@@ -1402,8 +1402,12 @@ def health_check():
     """Server holatini tekshirish va Render.com uxlamasligi uchun Keep-Alive endpoint"""
     return jsonify({
         "status": "online",
-        "service": "AI Chorva & Prayer Times Cloud Server",
+        "service": "AI Chorva Cloud & Prayer Times Backend",
+        "database": "PostgreSQL" if IS_POSTGRES else "SQLite",
+        "chorva_bot": f"@{CHORVA_BOT_USERNAME}" if CHORVA_BOT_TOKEN else "unconfigured",
+        "prayer_bot": "active" if PRAYER_BOT_TOKEN else "unconfigured",
         "version": "2.0.0",
+        "keep_awake": "enabled",
         "timestamp": datetime.utcnow().isoformat(),
         "tashkent_time": get_now_tashkent().strftime("%Y-%m-%d %H:%M:%S")
     }), 200
@@ -1416,7 +1420,6 @@ def get_prayer_regions():
         "status": "success",
         "regions": PRAYER_DATA
     })
-
 
 
 @app.route('/api/prayer/times', methods=['GET'])
@@ -1435,17 +1438,6 @@ def get_prayer_times_api():
             "message": f"Namoz vaqtlarini yuklashda xatolik: {str(e)}"
         }), 500
 
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "online",
-        "service": "AI Chorva Cloud & Prayer Backend",
-        "database": "PostgreSQL" if IS_POSTGRES else "SQLite",
-        "telegram_bot": f"@{TELEGRAM_BOT_USERNAME}" if TELEGRAM_BOT_TOKEN else "unconfigured",
-        "version": "2.0-cloud",
-        "server_time": str(datetime.now())
-    })
 
 
 @app.route('/api/telegram/webhook', methods=['POST'])
