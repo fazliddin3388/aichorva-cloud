@@ -21,10 +21,12 @@ import random
 import string
 import hashlib
 import threading
+import re
+import traceback
 from datetime import datetime, timedelta, date
 from functools import wraps
 
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, send_file, redirect
 from flask_cors import CORS
 import jwt
 import requests
@@ -856,11 +858,43 @@ def send_telegram_msg(chat_id, text, reply_markup=None, bot_token=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        r = requests.post(url, json=payload, timeout=6)
+        r = requests.post(url, json=payload, timeout=8)
         if r.status_code == 200:
             return r.json().get("result")
+        print(f"[TG MSG RESP ERR]: status={r.status_code} body={r.text}")
+        # Agar HTML formatda xatolik bo'lsa, oddiy matn sifatida qayta yuborish
+        if "entity" in r.text.lower() or "parse" in r.text.lower() or "bad request" in r.text.lower():
+            payload.pop("parse_mode", None)
+            r2 = requests.post(url, json=payload, timeout=8)
+            if r2.status_code == 200:
+                return r2.json().get("result")
     except Exception as e:
         print(f"[TG MSG ERR]: {e}")
+    return None
+
+
+def cache_apk_locally(file_id, bot_token=None):
+    """Admin yuborgan APK faylni Telegramdan yuklab olib, server diskida ChorvaERP.apk nomi bilan saqlash"""
+    tok = bot_token or CHORVA_BOT_TOKEN
+    if not tok or not file_id:
+        return None
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{tok}/getFile?file_id={file_id}", timeout=15)
+        if r.status_code == 200:
+            file_path = r.json().get("result", {}).get("file_path")
+            if file_path:
+                dl_url = f"https://api.telegram.org/file/bot{tok}/{file_path}"
+                dl_resp = requests.get(dl_url, timeout=90, stream=True)
+                if dl_resp.status_code == 200:
+                    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+                    with open(local_path, "wb") as f:
+                        for chunk in dl_resp.iter_content(chunk_size=1024 * 64):
+                            if chunk:
+                                f.write(chunk)
+                    print(f"[APK DISK SAVE OK]: Server diskiga saqlandi -> {local_path} ({os.path.getsize(local_path)} bayt)")
+                    return local_path
+    except Exception as e:
+        print(f"[APK DISK SAVE ERR]: {e}")
     return None
 
 
@@ -869,6 +903,23 @@ def send_telegram_document(chat_id, document, caption=None, reply_markup=None, b
     if not tok:
         return None
     url = f"https://api.telegram.org/bot{tok}/sendDocument"
+
+    # 1. Agar document server diskidagi mahalliy fayl bo'lsa
+    if isinstance(document, str) and os.path.exists(document):
+        try:
+            with open(document, "rb") as f_obj:
+                files = {"document": (os.path.basename(document), f_obj, "application/vnd.android.package-archive")}
+                data = {"chat_id": chat_id, "parse_mode": "HTML"}
+                if caption: data["caption"] = caption
+                if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+                r = requests.post(url, data=data, files=files, timeout=60)
+                if r.status_code == 200:
+                    return r.json().get("result")
+                print(f"[TG DOC FILE ERR]: status={r.status_code} body={r.text}")
+        except Exception as e:
+            print(f"[TG DOC FILE EXCEPTION]: {e}")
+
+    # 2. Agar document Telegram file_id bo'lsa
     payload = {"chat_id": chat_id, "document": document, "parse_mode": "HTML"}
     if caption:
         payload["caption"] = caption
@@ -879,7 +930,8 @@ def send_telegram_document(chat_id, document, caption=None, reply_markup=None, b
         if r.status_code == 200:
             return r.json().get("result")
         print(f"[TG DOC ERR]: token={tok[:10]}... status={r.status_code} body={r.text}")
-        # Agar bitta botda file_id o'tmasa, ikkinchi bot tokeni bilan ham urinib ko'rish
+
+        # Boshqa bot tokeni bilan urinib ko'rish
         other_tok = PRAYER_BOT_TOKEN if tok == CHORVA_BOT_TOKEN else CHORVA_BOT_TOKEN
         if other_tok and other_tok != tok:
             url2 = f"https://api.telegram.org/bot{other_tok}/sendDocument"
@@ -887,6 +939,18 @@ def send_telegram_document(chat_id, document, caption=None, reply_markup=None, b
             if r2.status_code == 200:
                 return r2.json().get("result")
             print(f"[TG DOC RETRY ERR]: token={other_tok[:10]}... status={r2.status_code} body={r2.text}")
+
+        # Agar file_id o'tmasa, server diskidagi ChorvaERP.apk ni fayl qilib uzatish
+        local_apk = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+        if os.path.exists(local_apk):
+            with open(local_apk, "rb") as f_obj:
+                files = {"document": ("ChorvaERP.apk", f_obj, "application/vnd.android.package-archive")}
+                data = {"chat_id": chat_id, "parse_mode": "HTML"}
+                if caption: data["caption"] = caption
+                if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+                r3 = requests.post(url, data=data, files=files, timeout=60)
+                if r3.status_code == 200:
+                    return r3.json().get("result")
     except Exception as e:
         print(f"[TG DOC EXCEPTION]: {e}")
     return None
@@ -1269,6 +1333,12 @@ def handle_telegram_update(update, bot_token=None):
                 traceback.print_exc()
             finally:
                 conn.close()
+
+            # Server diskida ham ChorvaERP.apk sifatida saqlab qo'yish (fon rejimida)
+            try:
+                threading.Thread(target=cache_apk_locally, args=(file_id, active_token), daemon=True).start()
+            except Exception:
+                pass
 
             ADMIN_STATE.pop(chat_id, None)
 
@@ -1838,7 +1908,26 @@ def handle_telegram_update(update, bot_token=None):
             if res:
                 return
 
-        # Agar bazada hali yangi APK yuklanmagan bo'lsa
+        # 2. Agar Telegram file_id bilan yuborish o'tmasa, server diskidagi mahalliy ChorvaERP.apk ni tekshiramiz
+        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+        if os.path.exists(local_path):
+            f_size = round(os.path.getsize(local_path) / (1024 * 1024), 2)
+            cap = (
+                "╭────────────────────────╮\n"
+                "   📲  <b>AI CHORVA RASMIY APK</b>\n"
+                "╰────────────────────────╯\n\n"
+                "📁 <b>Fayl:</b> <code>ChorvaERP.apk</code>\n"
+                f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
+                "🏷 <b>Versiya:</b> <b>Rasmiy Barqaror</b>\n\n"
+                "💡 <b>O'rnatish yo'riqnomasi:</b>\n"
+                "1️⃣ Yuqoridagi fayl ustiga bosib, telefoningizga o'rnating;\n"
+                "2️⃣ Ilovani ochgach, ushbu botdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasi orqali olingan kod bilan tizimga kiring!"
+            )
+            res2 = send_telegram_document(chat_id, local_path, caption=cap, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+            if res2:
+                return
+
+        # 3. Agar hali bazada ham, diskda ham bo'lmasa: Yo'riqnoma va to'g'ridan-to'g'ri havola
         fallback_text = (
             "╭────────────────────────╮\n"
             "   📥  <b>ILOVANI YUKLAB OLISH</b>\n"
@@ -1846,7 +1935,9 @@ def handle_telegram_update(update, bot_token=None):
             "📲 <b>AI Chorva APK (Android versiya):</b>\n"
             "Ilovangizning rasmiy barqaror versiyasi tayyorlangan!\n\n"
             "📁 <b>Fayl nomi:</b> <code>ChorvaERP.apk</code>\n"
-            "⚡️ <b>Hajmi:</b> ~5.1 MB\n\n"
+            "⚡️ <b>Hajmi:</b> ~4.8 MB\n\n"
+            "🌐 <b>To'g'ridan-to'g'ri brauzerdan yuklab olish:</b>\n"
+            "👉 <a href='https://aichorva-cloud.onrender.com/download/ChorvaERP.apk'>ChorvaERP.apk ni yuklab olish</a>\n\n"
             "🔑 <b>Kirish yo'riqnomasi:</b>\n"
             "1. Ilovani telefoningizga o'rnating;\n"
             "2. Botdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing;\n"
@@ -2214,8 +2305,13 @@ def chorva_bot_polling_thread():
                 data = resp.json()
                 for upd in data.get("result", []):
                     offset = upd["update_id"] + 1
-                    handle_telegram_update(upd, bot_token=CHORVA_BOT_TOKEN)
-        except Exception:
+                    try:
+                        handle_telegram_update(upd, bot_token=CHORVA_BOT_TOKEN)
+                    except Exception as e:
+                        print(f"[CHORVA BOT UPDATE ERR]: {e}")
+                        traceback.print_exc()
+        except Exception as e:
+            print(f"[CHORVA BOT POLL ERR]: {e}")
             time.sleep(3)
         time.sleep(0.5)
 
@@ -2238,8 +2334,13 @@ def prayer_bot_polling_thread():
                 data = resp.json()
                 for upd in data.get("result", []):
                     offset = upd["update_id"] + 1
-                    handle_telegram_update(upd, bot_token=PRAYER_BOT_TOKEN)
-        except Exception:
+                    try:
+                        handle_telegram_update(upd, bot_token=PRAYER_BOT_TOKEN)
+                    except Exception as e:
+                        print(f"[PRAYER BOT UPDATE ERR]: {e}")
+                        traceback.print_exc()
+        except Exception as e:
+            print(f"[PRAYER BOT POLL ERR]: {e}")
             time.sleep(3)
         time.sleep(0.5)
 
@@ -2297,6 +2398,36 @@ def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "tashkent_time": get_now_tashkent().strftime("%Y-%m-%d %H:%M:%S")
     }), 200
+
+
+@app.route('/download/ChorvaERP.apk', methods=['GET'])
+@app.route('/api/app/download', methods=['GET'])
+def download_latest_apk():
+    """Mobil ilovani to'g'ridan-to'g'ri brauzer orqali yuklab olish"""
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+    if os.path.exists(local_path):
+        return send_file(local_path, as_attachment=True, download_name="ChorvaERP.apk", mimetype="application/vnd.android.package-archive")
+    return redirect("https://github.com/fazliddin3388/aichorva-cloud/releases", code=302)
+
+
+@app.route('/api/app/latest', methods=['GET'])
+def get_latest_app_release():
+    """Eng so'nggi mobil ilova versiyasi haqida ma'lumot"""
+    conn = get_db()
+    c = dict_cursor(conn)
+    try:
+        c.execute(adapt_query("SELECT id, file_name, file_size, version_name, changelog, created_at FROM app_releases ORDER BY id DESC LIMIT 1"))
+        row = c.fetchone()
+        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+        has_local = os.path.exists(local_path)
+        return jsonify({
+            "status": "success",
+            "release": dict(row) if row else None,
+            "has_local_apk": has_local,
+            "download_url": "/download/ChorvaERP.apk"
+        })
+    finally:
+        conn.close()
 
 
 @app.route('/api/prayer/regions', methods=['GET'])
