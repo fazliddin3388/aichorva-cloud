@@ -832,29 +832,50 @@ USER_STATE = {}     # {user_id: 'waiting_support'}
 ADMIN_MSG_MAP = {}  # {admin_sent_msg_id: user_id}
 
 def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
-    """Botning doimiy asosiy menyu tugmalari (Ikkala bot uchun alohida professional menyu)"""
+    """Foydalanuvchilar va Admin uchun asosiy menyu (Foydalanuvchiga faqat o'ziga tegishli tugmalar chiqadi)"""
     if is_prayer_bot:
-        # 1. Faqat Namoz Vaqtlari Boti
+        # 1. Namoz Vaqtlari Boti
         kb = [
-            [{"text": "🕌 Namoz vaqtlari"}, {"text": "📍 Hudud tanlash"}],
-            [{"text": "🔔 Azon eslatmalari"}, {"text": "📖 Namoz o'qish tartibi"}],
+            [{"text": "🕌 Bugungi namoz vaqtlari"}, {"text": "📍 Hududni tanlash"}],
+            [{"text": "🔔 Azon eslatmalari"}, {"text": "📖 5 vaqt namoz tartibi"}],
+            [{"text": "🤲 Kunlik duolar va zikrlar"}],
         ]
         if is_admin:
-            kb.append([{"text": "📣 Reklama yuborish"}, {"text": "📊 Baza statistikasi"}])
+            kb.append([{"text": "👑 ADMIN BOSHQARUV PANELI"}])
     else:
-        # 2. Faqat AI Chorva Boti (@AIchorvabot)
+        # 2. AI Chorva Boti (@AIchorvabot) - Oddiy fermer ko'rinishi
         kb = [
             [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}],
-            [{"text": "🐂 AI Chorva haqida"}, {"text": "📥 Ilovani yuklab olish"}],
-            [{"text": "📊 Mening profilim"}, {"text": "✍️ Adminga murojaat"}],
+            [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "🐂 AI Chorva haqida"}],
+            [{"text": "👤 Mening profilim"}, {"text": "✍️ Adminga murojaat"}],
+            [{"text": "❓ Qo'llanma va Yordam"}],
         ]
         if is_admin:
-            kb.append([{"text": "📣 Reklama yuborish"}, {"text": "📊 Baza statistikasi"}])
-            kb.append([{"text": "📦 Yangi APK yuklash"}])
+            kb.append([{"text": "👑 ADMIN BOSHQARUV PANELI"}])
     return {
         "keyboard": kb,
         "resize_keyboard": True
     }
+
+
+def get_admin_panel_menu(is_prayer_bot=False):
+    """Faqat Admin uchun maxsus boshqaruv paneli menyusi"""
+    if is_prayer_bot:
+        kb = [
+            [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "📊 Baza statistikasi"}],
+            [{"text": "🔙 Asosiy menyuga qaytish"}],
+        ]
+    else:
+        kb = [
+            [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "📊 Baza statistikasi"}],
+            [{"text": "📦 Yangi APK yuklash"}, {"text": "👥 Foydalanuvchilar ro'yxati"}],
+            [{"text": "🔙 Asosiy menyuga qaytish"}],
+        ]
+    return {
+        "keyboard": kb,
+        "resize_keyboard": True
+    }
+
 
 
 
@@ -1216,25 +1237,27 @@ def handle_telegram_update(update, bot_token=None):
             f"👥 Telegram orqali yetkazildi: <b>{sent_count} ta</b> foydalanuvchiga\n"
             f"📱 <b>AI Chorva</b> mobil ilovasiga ham yangi e'lon sifatida joylandi!"
         )
-        send_telegram_msg(chat_id, report, reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+        send_telegram_msg(chat_id, report, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
         return
 
     # 2. Admin reklama buyrug'i
-    if is_admin and text in ("📣 Reklama yuborish", "/reklama", "/elon", "/broadcast"):
+    if is_admin and text in ("📣 Reklama / E'lon yuborish", "📣 Reklama yuborish", "/reklama", "/elon", "/broadcast"):
         ADMIN_STATE[chat_id] = "waiting_broadcast"
         instr = (
-            "📢 <b>REKLAMA VA E'LON TARQATISH (ADMIN)</b>\n\n"
-            "Foydalanuvchilarga yubormoqchi bo'lgan e'lon, reklama yoki yangilik matnini kiriting.\n\n"
-            "✨ <b>Qayerlarda ko'rinadi:</b>\n"
-            " ├ 1. Barcha Namoz boti va AI Chorva a'zolariga Telegramda DARHOL yetib boradi.\n"
-            " └ 2. AI Chorva mobil ilovasi bosh sahifasida ko'rkam e'lon bo'lib chiqadi!\n\n"
-            "<i>Bekor qilish uchun /cancel deb yozing.</i>"
+            "╭────────────────────────╮\n"
+            "   📢  <b>REKLAMA VA E'LON TARQATISH</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Foydalanuvchilarga yubormoqchi bo'lgan e'lon yoki reklama matnini kiriting.\n\n"
+            "✨ <b>Xabar qayerlarga yetkaziladi:</b>\n"
+            " ├ 1. Barcha Namoz boti va AI Chorva Telegram obunachilariga DARHOL boradi;\n"
+            " └ 2. AI Chorva mobil ilovasi bosh sahifasida qulay e'lon kartochkasi bo'lib chiqadi!\n\n"
+            "<i>Bekor qilish: /cancel</i>"
         )
         send_telegram_msg(chat_id, instr, reply_markup={"keyboard": [[{"text": "/cancel"}]], "resize_keyboard": True}, bot_token=active_token)
         return
 
     # 3. Admin statistika buyrug'i
-    if is_admin and text in ("📊 Baza statistikasi", "/statistika"):
+    if is_admin and text in ("📊 Baza statistikasi", "/statistika", "/stats"):
         conn = get_db()
         c = dict_cursor(conn)
         try:
@@ -1251,19 +1274,20 @@ def handle_telegram_update(update, bot_token=None):
             total_ads = c.fetchone()["cnt"]
 
             stat_text = (
-                "╔════════════════════════════╗\n"
-                "   📊 <b>TIZIM BAZASI STATISTIKASI</b>\n"
-                "╚════════════════════════════╝\n\n"
+                "╭────────────────────────╮\n"
+                "   📊  <b>TIZIM BAZASI STATISTIKASI</b>\n"
+                "╰────────────────────────╯\n\n"
                 f"🕌 <b>Namoz taqvimi obunachilari:</b> <b>{total_prayer} ta</b>\n"
                 f"👥 <b>Fermerlar (Foydalanuvchilar):</b> <b>{total_users} ta</b>\n"
-                f"🐂 <b>Hisobdagi jonivorlar:</b> <b>{total_bulls} ta</b>\n"
+                f"🐂 <b>Hisobdagi jami jonivorlar:</b> <b>{total_bulls} ta</b>\n"
                 f"📢 <b>Faol e'lon va reklamalar:</b> <b>{total_ads} ta</b>\n\n"
                 "🟢 <i>Ikkala Telegram bot va mobil API 100% barqaror ishlamoqda.</i>"
             )
-            send_telegram_msg(chat_id, stat_text, reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+            send_telegram_msg(chat_id, stat_text, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
         finally:
             conn.close()
         return
+
 
     # /start buyrug'i
     if text.startswith("/start"):
@@ -1316,7 +1340,7 @@ def handle_telegram_update(update, bot_token=None):
         return
 
     # ─── NAMOZ VAQTLARI BOTI BUYRUQLARI ───
-    if text in ("🕌 Namoz vaqtlari", "/namoz"):
+    if text in ("🕌 Bugungi namoz vaqtlari", "🕌 Namoz vaqtlari", "/namoz"):
         conn = get_db()
         c = conn.cursor()
         region = "Toshkent"
@@ -1332,7 +1356,7 @@ def handle_telegram_update(update, bot_token=None):
         send_telegram_msg(chat_id, card_text, reply_markup=get_prayer_action_keyboard(region), bot_token=active_token)
         return
 
-    if text in ("📍 Hudud tanlash", "📍 Hududni o'zgartirish"):
+    if text in ("📍 Hududni tanlash", "📍 Hudud tanlash", "📍 Hududni o'zgartirish"):
         send_telegram_msg(chat_id, "📍 <b>O'zbekiston viloyatini tanlang:</b>", reply_markup=get_regions_inline_keyboard(), bot_token=active_token)
         return
 
@@ -1354,11 +1378,11 @@ def handle_telegram_update(update, bot_token=None):
         send_telegram_msg(chat_id, f"🔔 <b>Azon bildirishnomalari:</b> {status_txt}\n\nO'zgartirish uchun pastdagi tugmani bosing:", reply_markup=kb, bot_token=active_token)
         return
 
-    if text == "📖 Namoz o'qish tartibi":
+    if text in ("📖 5 vaqt namoz tartibi", "📖 Namoz o'qish tartibi"):
         guide_text = (
-            "╔════════════════════════════╗\n"
-            "   📖 <b>5 VAQT NAMOZ TARTIBI</b>\n"
-            "╚════════════════════════════╝\n\n"
+            "╭────────────────────────╮\n"
+            "   📖  <b>5 VAQT NAMOZ TARTIBI</b>\n"
+            "╰────────────────────────╯\n\n"
             "1. 🏙 <b>Bomdod:</b> 2 rakat sunnat, 2 rakat farz.\n"
             "2. ☀️ <b>Peshin:</b> 4 rakat sunnat, 4 rakat farz, 2 rakat sunnat.\n"
             "3. 🌇 <b>Asr:</b> 4 rakat farz.\n"
@@ -1370,12 +1394,68 @@ def handle_telegram_update(update, bot_token=None):
         send_telegram_msg(chat_id, guide_text, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
         return
 
+    if text in ("🤲 Kunlik duolar va zikrlar", "/duolar", "/zikr"):
+        dua_text = (
+            "╭────────────────────────╮\n"
+            "   🤲  <b>KUNLIK DUO VA ZIKRLAR</b>\n"
+            "╰────────────────────────╯\n\n"
+            "1️⃣ <b>Tonggi va kechki zikr:</b>\n"
+            "<i>«Subhanallohi va bihamdihi, subhanallohil aziym»</i>\n\n"
+            "2️⃣ <b>Azon eshitgandagi duo:</b>\n"
+            "<i>«Allohumma robba hazihid da'vatit taammati vas solatil qoi'mah, ati Muhammadanil vasilata val faziylata vab'ashu maqomam mahmudanillaziy va'adtah.»</i>\n\n"
+            "3️⃣ <b>Masjidga kirish duosi:</b>\n"
+            "<i>«Allohummaftah liy abvaba rohmatik.»</i>\n\n"
+            "4️⃣ <b>Qiyinchilikdagi duo:</b>\n"
+            "<i>«La ilaha illa anta subhanaka inniy kuntu minaz zolimiyn.»</i>\n\n"
+            "✨ <i>Alloh taolo ibodatlaringizni ijobat qilsin!</i>"
+        )
+        send_telegram_msg(chat_id, dua_text, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+        return
+
+    # ─── ADMIN BOSHQARUV PANELI BUYRUQLARI ───
+    if is_admin and text in ("👑 ADMIN BOSHQARUV PANELI", "/admin", "/panel"):
+        admin_panel_text = (
+            "╭────────────────────────╮\n"
+            "   👑  <b>ADMIN BOSHQARUV PANELI</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Assalomu alaykum, <b>Bosh Admin</b>!\n"
+            "Kerakli boshqaruv bo'limini tanlang:\n\n"
+            " • 📣 <b>Reklama / E'lon yuborish:</b> Botlar va ilovaga bir vaqtda xabar tarqatish\n"
+            " • 📊 <b>Baza statistikasi:</b> Foydalanuvchilar, fermerlar va jonivorlar soni\n"
+            " • 📦 <b>Yangi APK yuklash:</b> Mobil ilovani yangilash\n"
+            " • 👥 <b>Foydalanuvchilar ro'yxati:</b> Ro'yxatdan o'tgan fermerlar\n"
+            " • 🔙 <b>Asosiy menyuga qaytish:</b> Oddiy foydalanuvchi ko'rinishiga o'tish"
+        )
+        send_telegram_msg(chat_id, admin_panel_text, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        return
+
+    if is_admin and text in ("🔙 Asosiy menyuga qaytish", "🔙 Asosiy menyu", "/menu"):
+        send_telegram_msg(chat_id, "Asosiy menyuga qaytildi.", reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+        return
+
+    if is_admin and text in ("👥 Foydalanuvchilar ro'yxati", "👥 Foydalanuvchilar", "/users"):
+        conn = get_db()
+        c = dict_cursor(conn)
+        try:
+            c.execute(adapt_query("SELECT id, phone, full_name, farm_name, is_verified FROM users ORDER BY id DESC LIMIT 15"))
+            rows = c.fetchall()
+            if rows:
+                u_list = "📋 <b>Oxirgi ro'yxatdan o'tgan fermerlar:</b>\n\n"
+                for u in rows:
+                    u_list += f"▫️ <b>#{u['id']}</b> | <b>{u['full_name'] or 'Nomsiz'}</b>\n    📞 <code>{u['phone']}</code> | 🏡 {u['farm_name'] or 'Mavjud emas'}\n"
+            else:
+                u_list = "Hozircha ro'yxatdan o'tgan fermerlar mavjud emas."
+            send_telegram_msg(chat_id, u_list, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        finally:
+            conn.close()
+        return
+
     # ─── AI CHORVA BOTI BUYRUQLARI ───
     if text in ("🐂 AI Chorva haqida", "🐂 AI Chorva", "🐂 AI Chorva ilovasi", "ℹ️ Ilova haqida"):
         info_text = (
-            "╔════════════════════════════╗\n"
-            "   🐂 <b>AI CHORVA MOBIL TIZIMI</b>\n"
-            "╚════════════════════════════╝\n\n"
+            "╭────────────────────────╮\n"
+            "   🐂  <b>AI CHORVA MOBIL TIZIMI</b>\n"
+            "╰────────────────────────╯\n\n"
             "<b>AI Chorva</b> — O'zbekiston chorvadorlari va fermerlari uchun yaratilgan eng mukammal mobil boshqaruv ilovasi!\n\n"
             "💡 <b>Asosiy imkoniyatlar:</b>\n"
             " • Jonivorlar hisobi, vazn dinamikasi va kunlik semirish (og'im)\n"
@@ -1390,7 +1470,8 @@ def handle_telegram_update(update, bot_token=None):
         send_telegram_msg(chat_id, info_text, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
         return
 
-    if text in ("📥 Ilovani yuklab olish", "/apk", "/app"):
+
+    if text in ("📥 Ilovani yuklab olish (APK)", "📥 Ilovani yuklab olish", "/apk", "/app"):
         conn = get_db()
         c = dict_cursor(conn)
         latest_apk = None
@@ -1408,9 +1489,9 @@ def handle_telegram_update(update, bot_token=None):
             ch_log = latest_apk.get("changelog") or ""
 
             cap = (
-                "╔════════════════════════════╗\n"
-                "   📲 <b>AI CHORVA RASMIY APK</b>\n"
-                "╚════════════════════════════╝\n\n"
+                "╭────────────────────────╮\n"
+                "   📲  <b>AI CHORVA RASMIY APK</b>\n"
+                "╰────────────────────────╯\n\n"
                 f"📁 <b>Fayl:</b> <code>{f_name}</code>\n"
                 f"🏷 <b>Versiya:</b> <b>{v_name}</b>\n"
                 f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
@@ -1429,9 +1510,9 @@ def handle_telegram_update(update, bot_token=None):
 
         # Agar bazada hali yangi APK yuklanmagan bo'lsa
         fallback_text = (
-            "╔════════════════════════════╗\n"
-            "   📥 <b>ILOVANI YUKLAB OLISH</b>\n"
-            "╚════════════════════════════╝\n\n"
+            "╭────────────────────────╮\n"
+            "   📥  <b>ILOVANI YUKLAB OLISH</b>\n"
+            "╰────────────────────────╯\n\n"
             "📲 <b>AI Chorva APK (Android versiya):</b>\n"
             "Ilovangizning rasmiy barqaror versiyasi tayyorlangan!\n\n"
             "📁 <b>Fayl nomi:</b> <code>ChorvaERP.apk</code>\n"
@@ -1454,9 +1535,9 @@ def handle_telegram_update(update, bot_token=None):
     if is_admin and text in ("📦 Yangi APK yuklash", "/newapk", "/uploadapk"):
         ADMIN_STATE[chat_id] = "waiting_apk"
         prompt_apk = (
-            "╔════════════════════════════╗\n"
-            "   📦 <b>YANGI APK YUKLASH</b>\n"
-            "╚════════════════════════════╝\n\n"
+            "╭────────────────────────╮\n"
+            "   📦  <b>YANGI APK YUKLASH</b>\n"
+            "╰────────────────────────╯\n\n"
             "Menga shunchaki yangilangan <code>.apk</code> ilova faylini jo'nating (fayl sifatida).\n\n"
             "💡 <b>Maslahat:</b> Xabar izohiga (caption) yangi versiya raqami yoki yangiliklarni yozib yuborishingiz mumkin (masalan: <code>v1.8 - Yangi dizayn</code>).\n\n"
             "<i>Fayl kelishi bilan u darhol serverda saqlanadi va barcha foydalanuvchilar yuklab olishi uchun avtomatik faollashadi!</i>\n\n"
@@ -1466,7 +1547,7 @@ def handle_telegram_update(update, bot_token=None):
         return
 
 
-    if text in ("📊 Mening profilim", "📊 Mening hisobim"):
+    if text in ("👤 Mening profilim", "📊 Mening profilim", "📊 Mening hisobim"):
         conn = get_db()
         c = dict_cursor(conn)
         try:
@@ -1474,9 +1555,9 @@ def handle_telegram_update(update, bot_token=None):
             u = c.fetchone()
             if u:
                 p_text = (
-                    "╔════════════════════════════╗\n"
-                    "   👤 <b>FERMER SHAXSIY PROFILI</b>\n"
-                    "╚════════════════════════════╝\n\n"
+                    "╭────────────────────────╮\n"
+                    "   👤  <b>FERMER SHAXSIY PROFILI</b>\n"
+                    "╰────────────────────────╯\n\n"
                     f"👤 <b>Ism:</b> {u.get('full_name') or 'Noma`lum'}\n"
                     f"📞 <b>Telefon:</b> <code>{u.get('phone')}</code>\n"
                     f"🏡 <b>Ferma:</b> {u.get('farm_name') or 'Mening fermam'}\n"
@@ -1494,17 +1575,19 @@ def handle_telegram_update(update, bot_token=None):
             conn.close()
         return
 
-    if text in ("❓ Yordam", "❓ Qo'llab-quvvatlash"):
+    if text in ("❓ Qo'llanma va Yordam", "❓ Yordam", "❓ Qo'llab-quvvatlash", "/help"):
         help_text = (
-            "╔════════════════════════════╗\n"
-            "   ❓ <b>YORDAM VA QO'LLAB-QUVVATLASH</b>\n"
-            "╚════════════════════════════╝\n\n"
-            "💡 <b>Ko'p beriladigan savollar:</b>\n\n"
-            "1️⃣ <b>Ilovaga qanday kiraman?</b>\n"
-            "└ «📱 Telefon raqamni ulashish» tugmasini bosing. Bot sizga 6 xonali bir martalik kod beradi, shu kodni ilovaga kiritasiz.\n\n"
-            "2️⃣ <b>Internet o'chib qolsa nima bo'ladi?</b>\n"
-            "└ Ilova internet yo'qligida ham to'liq ishlayveradi. Internet paydo bo'lishi bilan barcha yangi yozuvlar avtomatik bulutga yuboriladi.\n\n"
-            "👨‍💻 <b>Admin:</b> Savol yoki takliflar uchun adminga xabar yuborishingiz mumkin."
+            "╭────────────────────────╮\n"
+            "   💡  <b>QO'LLANMA VA YORDAM</b>\n"
+            "╰────────────────────────╯\n\n"
+            "🔹 <b>1. Mobil ilovaga qanday kiraman?</b>\n"
+            "└ Pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing. Bot sizga 6 xonali maxsus kod beradi. Shu kodni ilovaga kiritib, 0 so'm xarajat bilan kirasiz!\n\n"
+            "🔹 <b>2. APK ilovani qayerdan yuklayman?</b>\n"
+            "└ Menyudagi <b>«📥 Ilovani yuklab olish (APK)»</b> tugmasini bosing. Bot ilovaning eng so'nggi rasmiy faylini to'g'ridan-to'g'ri Telegramingizga yuboradi.\n\n"
+            "🔹 <b>3. Internet o'chib qolsa hisoblar yo'qolmaydimi?</b>\n"
+            "└ Yo'q! AI Chorva ilovasi 100% oflayn ishlaydi. Internet paydo bo'lishi bilan barcha yangi jonivorlar va hisobotlar avtomatik bulutga sinxronlanadi.\n\n"
+            "🔹 <b>4. Savolingiz yoki taklifingiz bormi?</b>\n"
+            "└ <b>«✍️ Adminga murojaat»</b> tugmasi orqali yozing, admin shaxsan o'zi javob qaytaradi!"
         )
         send_telegram_msg(chat_id, help_text, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
         return
@@ -1512,7 +1595,9 @@ def handle_telegram_update(update, bot_token=None):
     if text in ("✍️ Adminga murojaat", "✍️ Murojaat", "/murojaat", "/support"):
         USER_STATE[user_id] = "waiting_support"
         prompt = (
-            "✍️ <b>ADMINGA MUROJAAT YUBORISH</b>\n\n"
+            "╭────────────────────────╮\n"
+            "   ✍️  <b>ADMINGA MUROJAAT</b>\n"
+            "╰────────────────────────╯\n\n"
             "AI Chorva bo'yicha savolingiz, taklifingiz yoki tushunmagan joyingiz bo'lsa, "
             "batafsil yozib yuboring.\n\n"
             "📩 Xabaringiz to'g'ridan-to'g'ri adminga boradi va admin javob berishi bilan javob shu yerga keladi!\n\n"
@@ -1520,6 +1605,7 @@ def handle_telegram_update(update, bot_token=None):
         )
         send_telegram_msg(chat_id, prompt, reply_markup={"keyboard": [[{"text": "/cancel"}]], "resize_keyboard": True}, bot_token=active_token)
         return
+
 
 
     # Foydalanuvchi Kontaktini (Telefonini) yuborganida
@@ -1686,6 +1772,10 @@ def chorva_bot_polling_thread():
     if not CHORVA_BOT_TOKEN:
         return
     print(f"[TELEGRAM] AI Chorva Bot (@{CHORVA_BOT_USERNAME}) Polling ishga tushmoqda...")
+    try:
+        requests.post(f"https://api.telegram.org/bot{CHORVA_BOT_TOKEN}/deleteWebhook", timeout=8)
+    except Exception:
+        pass
     offset = 0
     while True:
         try:
@@ -1706,6 +1796,10 @@ def prayer_bot_polling_thread():
     if not PRAYER_BOT_TOKEN:
         return
     print("[TELEGRAM] Asl Namoz Vaqtlari Boti Polling ishga tushmoqda...")
+    try:
+        requests.post(f"https://api.telegram.org/bot{PRAYER_BOT_TOKEN}/deleteWebhook", timeout=8)
+    except Exception:
+        pass
     offset = 0
     while True:
         try:
@@ -1719,6 +1813,7 @@ def prayer_bot_polling_thread():
         except Exception:
             time.sleep(3)
         time.sleep(0.5)
+
 
 
 def keep_awake_pinger_thread():
