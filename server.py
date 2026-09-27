@@ -52,8 +52,8 @@ ADMIN_USERNAMES = {"fazliddinabduraximov", "fazliddin3388", "fazliddin_abduraxim
 ADMIN_PHONES = {"+998973387827", "998973387827", "+998973388827", "998973388827"}
 ACTIVE_ADMIN_IDS = set(ADMIN_IDS)
 
-def is_admin_user(user_id, username=None, phone=None):
-    """Foydalanuvchi Bosh Admin ekanligini ID, Username, Telefon yoki Baza orqali 100% kafolatli aniqlash"""
+def is_admin_user(user_id, username=None, phone=None, full_name=None):
+    """Foydalanuvchi Bosh Admin ekanligini ID, Username, Telefon, Ism yoki Baza orqali 100% kafolatli aniqlash"""
     if user_id:
         try:
             uid = int(user_id)
@@ -66,6 +66,17 @@ def is_admin_user(user_id, username=None, phone=None):
         except Exception:
             pass
 
+    # 1. Ism yoki familiyada Fazliddin bo'lsa (Lotin va Kirill \u0444\u0430\u0437\u043b\u0438\u0434\u0434\u0438\u043d)
+    if full_name:
+        fn = str(full_name).lower()
+        # "fazliddin" yoki "фазлиддин"
+        if "fazliddin" in fn or "\u0444\u0430\u0437\u043b\u0438\u0434\u0434\u0438\u043d" in fn:
+            if user_id:
+                try: ACTIVE_ADMIN_IDS.add(int(user_id))
+                except Exception: pass
+            return True
+
+    # 2. Username tekshiruvi
     if username:
         clean_u = str(username).lower().replace("@", "").strip()
         if clean_u in ADMIN_USERNAMES:
@@ -74,6 +85,7 @@ def is_admin_user(user_id, username=None, phone=None):
                 except Exception: pass
             return True
 
+    # 3. Telefon tekshiruvi
     if phone:
         clean_p = str(phone).replace(" ", "").replace("-", "").strip()
         if clean_p in ADMIN_PHONES or "973387827" in clean_p:
@@ -82,13 +94,13 @@ def is_admin_user(user_id, username=None, phone=None):
                 except Exception: pass
             return True
 
-    # Ma'lumotlar bazasidan tekshiramiz
+    # 4. Ma'lumotlar bazasidan tekshiramiz
     if user_id:
         try:
             conn = get_db()
             c = dict_cursor(conn)
             try:
-                c.execute(adapt_query("SELECT role, phone FROM users WHERE telegram_id = ?"), (user_id,))
+                c.execute(adapt_query("SELECT role, phone, full_name FROM users WHERE telegram_id = ?"), (user_id,))
                 row = c.fetchone()
                 if row:
                     if row.get("role") == "admin":
@@ -96,6 +108,10 @@ def is_admin_user(user_id, username=None, phone=None):
                         return True
                     db_p = str(row.get("phone") or "").replace(" ", "").replace("-", "").strip()
                     if db_p in ADMIN_PHONES or "973387827" in db_p:
+                        ACTIVE_ADMIN_IDS.add(int(user_id))
+                        return True
+                    db_fn = str(row.get("full_name") or "").lower()
+                    if "fazliddin" in db_fn or "\u0444\u0430\u0437\u043b\u0438\u0434\u0434\u0438\u043d" in db_fn:
                         ACTIVE_ADMIN_IDS.add(int(user_id))
                         return True
             finally:
@@ -135,9 +151,19 @@ else:
     import sqlite3
     LOCAL_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chorva_cloud.db")
 
+    class SmartRow(dict):
+        """SQLite qatorlarini indeks [0], kalit ['col'] va .get('col') orqali xatosiz o'qish imkoniyati"""
+        def __getitem__(self, item):
+            if isinstance(item, int):
+                return list(self.values())[item]
+            return super().__getitem__(item)
+
+    def smart_row_factory(cursor, row):
+        return SmartRow({col[0]: row[idx] for idx, col in enumerate(cursor.description)})
+
     def get_db():
         conn = sqlite3.connect(LOCAL_DB_FILE)
-        conn.row_factory = sqlite3.Row
+        conn.row_factory = smart_row_factory
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
@@ -852,8 +878,17 @@ def send_telegram_document(chat_id, document, caption=None, reply_markup=None, b
         r = requests.post(url, json=payload, timeout=35)
         if r.status_code == 200:
             return r.json().get("result")
+        print(f"[TG DOC ERR]: token={tok[:10]}... status={r.status_code} body={r.text}")
+        # Agar bitta botda file_id o'tmasa, ikkinchi bot tokeni bilan ham urinib ko'rish
+        other_tok = PRAYER_BOT_TOKEN if tok == CHORVA_BOT_TOKEN else CHORVA_BOT_TOKEN
+        if other_tok and other_tok != tok:
+            url2 = f"https://api.telegram.org/bot{other_tok}/sendDocument"
+            r2 = requests.post(url2, json=payload, timeout=35)
+            if r2.status_code == 200:
+                return r2.json().get("result")
+            print(f"[TG DOC RETRY ERR]: token={other_tok[:10]}... status={r2.status_code} body={r2.text}")
     except Exception as e:
-        print(f"[TG DOC ERR]: {e}")
+        print(f"[TG DOC EXCEPTION]: {e}")
     return None
 
 
@@ -891,26 +926,41 @@ USER_STATE = {}     # {user_id: 'waiting_support'}
 ADMIN_MSG_MAP = {}  # {admin_sent_msg_id: user_id}
 
 def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
-    """Foydalanuvchilar va Admin uchun asosiy menyu (Foydalanuvchiga faqat o'ziga tegishli tugmalar chiqadi)"""
+    """Foydalanuvchilar va Bosh Admin uchun alohida moslashtirilgan asosiy menyu"""
     if is_prayer_bot:
         # 1. Namoz Vaqtlari Boti
-        kb = [
-            [{"text": "🕌 Bugungi namoz vaqtlari"}, {"text": "📍 Hududni tanlash"}],
-            [{"text": "🔔 Azon eslatmalari"}, {"text": "📖 5 vaqt namoz tartibi"}],
-            [{"text": "🤲 Kunlik duolar va zikrlar"}],
-        ]
         if is_admin:
-            kb.append([{"text": "👑 ADMIN BOSHQARUV PANELI"}])
+            kb = [
+                [{"text": "👑 ADMIN BOSHQARUV PANELI"}],
+                [{"text": "🕌 Bugungi namoz vaqtlari"}, {"text": "📍 Hududni tanlash"}],
+                [{"text": "🔔 Azon eslatmalari"}, {"text": "📖 5 vaqt namoz tartibi"}],
+                [{"text": "🤲 Kunlik duolar va zikrlar"}, {"text": "📊 Baza statistikasi"}],
+            ]
+        else:
+            kb = [
+                [{"text": "🕌 Bugungi namoz vaqtlari"}, {"text": "📍 Hududni tanlash"}],
+                [{"text": "🔔 Azon eslatmalari"}, {"text": "📖 5 vaqt namoz tartibi"}],
+                [{"text": "🤲 Kunlik duolar va zikrlar"}],
+            ]
     else:
-        # 2. AI Chorva Boti (@AIchorvabot) - Oddiy fermer ko'rinishi
-        kb = [
-            [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}],
-            [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "🐂 AI Chorva haqida"}],
-            [{"text": "👤 Mening profilim"}, {"text": "✍️ Adminga murojaat"}],
-            [{"text": "❓ Qo'llanma va Yordam"}],
-        ]
+        # 2. AI Chorva Boti (@AIchorvabot)
         if is_admin:
-            kb.append([{"text": "👑 ADMIN BOSHQARUV PANELI"}])
+            # 👑 Bosh Admin uchun to'liq boshqaruv menyusi (ro'yxatdan o'tish yoki adminga murojaat ko'rinmaydi)
+            kb = [
+                [{"text": "👑 ADMIN BOSHQARUV PANELI"}],
+                [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "🐂 AI Chorva haqida"}],
+                [{"text": "👤 Mening profilim"}, {"text": "📊 Baza statistikasi"}],
+                [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "📦 Yangi APK yuklash"}],
+                [{"text": "❓ Qo'llanma va Yordam"}],
+            ]
+        else:
+            # 🌾 Oddiy fermer (foydalanuvchi) ko'rinishi
+            kb = [
+                [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}],
+                [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "🐂 AI Chorva haqida"}],
+                [{"text": "👤 Mening profilim"}, {"text": "✍️ Adminga murojaat"}],
+                [{"text": "❓ Qo'llanma va Yordam"}],
+            ]
     return {
         "keyboard": kb,
         "resize_keyboard": True
@@ -993,17 +1043,12 @@ def handle_telegram_update(update, bot_token=None):
         username = from_user.get("username", "")
         first_name = from_user.get("first_name", "")
         last_name = from_user.get("last_name", "")
-        full_u_name = f"{first_name} {last_name}".strip().lower()
-
-        if "fazliddin" in full_u_name or "фазлиддин" in full_u_name:
-            if "abdurax" in full_u_name or "абдурах" in full_u_name:
-                try: ACTIVE_ADMIN_IDS.add(int(user_id))
-                except Exception: pass
+        full_u_name = f"{first_name} {last_name}".strip()
 
         msg = cb.get("message", {})
         chat_id = msg.get("chat", {}).get("id")
         msg_id = msg.get("message_id")
-        is_admin = is_admin_user(user_id, username)
+        is_admin = is_admin_user(user_id, username=username, full_name=full_u_name)
 
         if cb_data == "test_azon_notif":
             answer_callback_query(cb_id, "🔔 Test azon eslatmasi yuborildi!", bot_token=active_token)
@@ -1100,7 +1145,7 @@ def handle_telegram_update(update, bot_token=None):
             return
 
     # 2. Xabar (Message) kelganda
-    msg = update.get("message")
+    msg = update.get("message") or update.get("edited_message")
     if not msg:
         return
 
@@ -1114,15 +1159,10 @@ def handle_telegram_update(update, bot_token=None):
 
     first_name = from_user.get("first_name", "")
     last_name = from_user.get("last_name", "")
-    full_u_name = f"{first_name} {last_name}".strip().lower()
+    full_u_name = f"{first_name} {last_name}".strip()
 
-    # Fazliddin Abduraximovni ism/familiya yoki kod orqali admin sifatida avtomatik tanish
-    if "fazliddin" in full_u_name or "фазлиддин" in full_u_name:
-        if "abdurax" in full_u_name or "абдурах" in full_u_name or "3388" in text or "7827" in text:
-            try: ACTIVE_ADMIN_IDS.add(int(user_id))
-            except Exception: pass
-
-    is_admin = is_admin_user(user_id, username)
+    is_admin = is_admin_user(user_id, username=username, full_name=full_u_name)
+    print(f"[TG UPDATE] user_id={user_id}, name='{full_u_name}', is_admin={is_admin}, text='{text}', doc={'yes' if doc else 'no'}")
 
     # Namoz boti foydalanuvchilarini avtomatik obuna qilish (barcha foydalanuvchilar azon eslatmalarini oladi)
     if is_prayer_bot and user_id:
@@ -1139,61 +1179,132 @@ def handle_telegram_update(update, bot_token=None):
         except Exception:
             pass
 
-
-    # 0.0. Admin yangi APK fayl yuborganida (Serverdagi versiyani avtomatik yangilash!)
-    if is_admin and doc:
-        f_name = doc.get("file_name", "ChorvaERP.apk")
-        mime = doc.get("mime_type", "")
-        f_size = doc.get("file_size", 0)
-        file_id = doc.get("file_id")
-
-        if f_name.lower().endswith(".apk") or "android" in mime or "package-archive" in mime:
-            cap = (msg.get("caption") or "").strip()
-            version_match = re.search(r'v\d+(\.\d+)*', cap, re.IGNORECASE)
-            version_name = version_match.group(0) if version_match else (cap[:30] if cap else "Yangi versiya")
-            changelog = cap
-
-            size_mb = round(f_size / (1024 * 1024), 2)
-
-            conn = get_db()
-            c = conn.cursor()
-            try:
-                c.execute(adapt_query("""
-                    INSERT INTO app_releases (file_id, file_name, file_size, version_name, changelog, uploaded_by)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """), (file_id, f_name, f_size, version_name, changelog, user_id))
-                conn.commit()
-            except Exception as e:
-                print(f"[APK SAVE ERR]: {e}")
-            finally:
-                conn.close()
-
-            ADMIN_STATE.pop(chat_id, None)
-
-            success_admin_msg = (
-                "╔════════════════════════════╗\n"
-                "   🎉 <b>YANGI APK VERSIYASI FAOL!</b>\n"
-                "╚════════════════════════════╝\n\n"
-                f"📁 <b>Fayl:</b> <code>{f_name}</code>\n"
-                f"📦 <b>Hajmi:</b> <b>{size_mb} MB</b>\n"
-                f"🏷 <b>Versiya:</b> <b>{version_name}</b>\n"
-            )
-            if changelog:
-                success_admin_msg += f"📝 <b>Izoh / Yangiliklar:</b>\n<i>{changelog}</i>\n\n"
-            success_admin_msg += (
-                "────────────────────────\n"
-                "✅ <b>Muvaffaqiyatli saqlandi!</b>\n"
-                "Endi barcha foydalanuvchilar botda «📥 Ilovani yuklab olish» tugmasini bosganda "
-                "aynan siz yuborgan ushbu yangi APK to'g'ridan-to'g'ri ularning telefoniga yuboriladi!"
-            )
-            send_telegram_msg(chat_id, success_admin_msg, reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
-            return
+    # 0.0. Admin APK yuklash holatida bo'lsa yoki bevosita APK yuborganida
+    is_in_apk_state = (ADMIN_STATE.get(chat_id) == "waiting_apk")
 
     # 0. Holatni bekor qilish
     if text in ("/cancel", "❌ Bekor qilish", "Bekor qilish", "/bekor", "❌ Bekor qilish (/cancel)"):
         ADMIN_STATE.pop(chat_id, None)
         USER_STATE.pop(user_id, None)
         send_telegram_msg(chat_id, "Amal bekor qilindi.", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+        return
+
+    # A) Admin yangi APK fayl (Document) yuborganida
+    if doc and (is_admin or is_in_apk_state):
+        f_name = doc.get("file_name") or "ChorvaERP.apk"
+        mime = (doc.get("mime_type") or "").lower()
+        f_size = doc.get("file_size") or 0
+        file_id = doc.get("file_id")
+
+        is_apk_target = (
+            is_in_apk_state or
+            f_name.lower().endswith(".apk") or
+            "apk" in f_name.lower() or
+            "android" in mime or
+            "package-archive" in mime or
+            "application/octet-stream" in mime
+        )
+
+        if is_apk_target:
+            if not f_name.lower().endswith(".apk"):
+                f_name = f"{f_name}.apk"
+
+            cap = (msg.get("caption") or text or "").strip()
+            version_match = re.search(r'v?\d+(\.\d+)+', cap, re.IGNORECASE)
+            if not version_match:
+                version_match = re.search(r'v?\d+', cap, re.IGNORECASE)
+            if not version_match:
+                version_match = re.search(r'v?\d+(\.\d+)+', f_name, re.IGNORECASE)
+
+            version_name = version_match.group(0) if version_match else "v1.7"
+            changelog = cap or f"Yangi rasmiy APK ilovasi ({f_name})"
+            size_mb = round(f_size / (1024 * 1024), 2) if f_size else 0.0
+
+            if not file_id:
+                send_telegram_msg(
+                    chat_id,
+                    "⚠️ <b>Xatolik:</b> Telegram fayl identifikatorini (file_id) aniqlab bo'lmadi. Iltimos faylni qaytadan yuboring.",
+                    reply_markup=get_telegram_main_menu(True, is_prayer_bot),
+                    bot_token=active_token
+                )
+                return
+
+            conn = get_db()
+            c = conn.cursor()
+            try:
+                if not IS_POSTGRES:
+                    c.execute("""
+                        CREATE TABLE IF NOT EXISTS app_releases (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            file_id TEXT NOT NULL,
+                            file_name TEXT,
+                            file_size INTEGER,
+                            version_name TEXT DEFAULT 'v1.7',
+                            changelog TEXT,
+                            uploaded_by INTEGER,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                else:
+                    c.execute("""
+                        CREATE TABLE IF NOT EXISTS app_releases (
+                            id SERIAL PRIMARY KEY,
+                            file_id TEXT NOT NULL,
+                            file_name VARCHAR(256),
+                            file_size BIGINT,
+                            version_name VARCHAR(64) DEFAULT 'v1.7',
+                            changelog TEXT,
+                            uploaded_by BIGINT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                c.execute(adapt_query("""
+                    INSERT INTO app_releases (file_id, file_name, file_size, version_name, changelog, uploaded_by)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """), (file_id, f_name, f_size, version_name, changelog, user_id))
+                conn.commit()
+                print(f"[APK SUCCESS]: Saved new APK {f_name} ({size_mb} MB) version={version_name} file_id={file_id}")
+            except Exception as e:
+                print(f"[APK SAVE ERR]: {e}")
+                traceback.print_exc()
+            finally:
+                conn.close()
+
+            ADMIN_STATE.pop(chat_id, None)
+
+            success_admin_msg = (
+                "╭────────────────────────╮\n"
+                "   🎉  <b>YANGI APK VERSIYASI SAQLANDI!</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"📁 <b>Fayl nomi:</b> <code>{f_name}</code>\n"
+                f"📦 <b>Hajmi:</b> <b>{size_mb} MB</b>\n"
+                f"🏷 <b>Versiya:</b> <b>{version_name}</b>\n"
+            )
+            if changelog and changelog != f_name:
+                success_admin_msg += f"📝 <b>Izoh / Yangiliklar:</b>\n<i>{changelog}</i>\n\n"
+            success_admin_msg += (
+                "────────────────────────\n"
+                "✅ <b>Serverda muvaffaqiyatli saqlandi!</b>\n\n"
+                "Endi barcha foydalanuvchilar (va siz) botdagi <b>«📥 Ilovani yuklab olish (APK)»</b> "
+                "tugmasini bosganda aynan siz hozir yuklagan ushbu yangi fayl yuboriladi!"
+            )
+            send_telegram_msg(chat_id, success_admin_msg, reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+            return
+
+    # B) Agar admin APK kutish holatida bo'lib, lekin fayl emas boshqa narsa yuborgan bo'lsa:
+    if is_in_apk_state and not doc:
+        warn_apk_text = (
+            "⚠️ <b>Iltimos, APK faylini yuboring!</b>\n\n"
+            "Siz matn yoki boshqa turdagi xabar yubordingiz. Yangi ilovani yuklash uchun faylni "
+            "Telegramga <b>Fayl (Document)</b> sifatida ilova qilib jo'nating (masalan: <code>ChorvaERP.apk</code>).\n\n"
+            "<i>Bekor qilish uchun pastdagi «❌ Bekor qilish» tugmasini bosing.</i>"
+        )
+        send_telegram_msg(
+            chat_id,
+            warn_apk_text,
+            reply_markup={"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True},
+            bot_token=active_token
+        )
         return
 
 
@@ -1435,36 +1546,66 @@ def handle_telegram_update(update, bot_token=None):
             finally:
                 conn.close()
 
-            welcome_text = (
-                "╔════════════════════════════╗\n"
-                "   🕌 <b>NAMOZ VAQTLARI BOTI</b>\n"
-                "╚════════════════════════════╝\n\n"
-                f"👋 <b>Assalomu alaykum, {from_user.get('first_name', 'Hurmatli foydalanuvchi')}!</b>\n\n"
-                "O'zbekistonning barcha viloyat, shahar va tumanlari bo'yicha aniq namoz taqvimi hamda azon eslatmalari botiga xush kelibsiz!\n\n"
-                "✨ <b>Imkoniyatlar:</b>\n"
-                " ├ 🕌 <b>Kunlik 5 vaqt namoz taqvimi</b> (60+ hudud)\n"
-                " ├ 🔔 <b>Har bir namozda avtomatik Azon eslatmasi</b>\n"
-                " ├ 📍 <b>Hududni istalgan payt o'zgartirish</b>\n"
-                " └ 📖 <b>5 vaqt namoz o'qish tartibi</b>\n\n"
-                "👇 <i>Quyidagi menyu tugmalaridan birini tanlang:</i>"
-            )
+            if is_admin:
+                welcome_text = (
+                    "╔════════════════════════════╗\n"
+                    "   🕌 <b>NAMOZ VAQTLARI BOTI (ADMIN)</b>\n"
+                    "╚════════════════════════════╝\n\n"
+                    f"👋 <b>Assalomu alaykum, Bosh Admin — {from_user.get('first_name', 'Fazliddin')}!</b>\n\n"
+                    "Asl Namoz Vaqtlari Boti boshqaruviga xush kelibsiz!\n\n"
+                    "👑 <b>Admin boshqaruv imkoniyatlari:</b>\n"
+                    " ├ 👑 <b>ADMIN BOSHQARUV PANELI:</b> Barcha obunachilarga e'lon tarqatish\n"
+                    " ├ 🕌 <b>Kunlik namoz vaqtlari:</b> 60+ hudud taqvimi\n"
+                    " ├ 🔔 <b>Azon eslatmasi:</b> Bildirishnomani sinash va monitoring\n"
+                    " └ 📊 <b>Statistika:</b> Jami namoz obunachilari soni\n\n"
+                    "👇 <i>Quyidagi menyu tugmalaridan birini tanlang:</i>"
+                )
+            else:
+                welcome_text = (
+                    "╔════════════════════════════╗\n"
+                    "   🕌 <b>NAMOZ VAQTLARI BOTI</b>\n"
+                    "╚════════════════════════════╝\n\n"
+                    f"👋 <b>Assalomu alaykum, {from_user.get('first_name', 'Hurmatli foydalanuvchi')}!</b>\n\n"
+                    "O'zbekistonning barcha viloyat, shahar va tumanlari bo'yicha aniq namoz taqvimi hamda azon eslatmalari botiga xush kelibsiz!\n\n"
+                    "✨ <b>Imkoniyatlar:</b>\n"
+                    " ├ 🕌 <b>Kunlik 5 vaqt namoz taqvimi</b> (60+ hudud)\n"
+                    " ├ 🔔 <b>Har bir namozda avtomatik Azon eslatmasi</b>\n"
+                    " ├ 📍 <b>Hududni istalgan payt o'zgartirish</b>\n"
+                    " └ 📖 <b>5 vaqt namoz o'qish tartibi</b>\n\n"
+                    "👇 <i>Quyidagi menyu tugmalaridan birini tanlang:</i>"
+                )
 
         else:
-            welcome_text = (
-                "╔════════════════════════════╗\n"
-                "   🐂 <b>AI CHORVA RASMIY BOTI</b>\n"
-                "╚════════════════════════════╝\n\n"
-                f"👋 <b>Assalomu alaykum, {from_user.get('first_name', 'Hurmatli foydalanuvchi')}!</b>\n\n"
-                "<b>AI Chorva</b> — chorvachilik va fermerlik tizimining rasmiy botiga xush kelibsiz!\n\n"
-                "📲 <b>Ilovaga 0 so'm SMS xarajat bilan kirish:</b>\n"
-                "Ilovaga xavfsiz kirish uchun pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing va 6 xonali tasdiqlash kodini oling!\n\n"
-                "✨ <b>Imkoniyatlar:</b>\n"
-                " ├ 🐂 Jonivorlar hisobi, vazn dinamikasi va kunlik og'im\n"
-                " ├ 🌾 Yem ombori va kunlik ratsion taqsimoti\n"
-                " ├ 💰 Kassa, daromad va sof foyda tahlili\n"
-                " └ ☁️ Barcha ma'lumotlarni bulutda xavfsiz saqlash\n\n"
-                "👇 <i>Kerakli bo'limni tanlang:</i>"
-            )
+            if is_admin:
+                welcome_text = (
+                    "╔════════════════════════════╗\n"
+                    "   👑 <b>BOSH ADMIN BOSHQARUVI</b>\n"
+                    "╚════════════════════════════╝\n\n"
+                    f"👋 <b>Assalomu alaykum, Bosh Admin — {from_user.get('first_name', 'Fazliddin')}!</b>\n\n"
+                    "Siz <b>AI Chorva</b> tizimining boshqaruvchisiz. Tizim sizni to'liq tanidi!\n\n"
+                    "👑 <b>Admin boshqaruv imkoniyatlari:</b>\n"
+                    " ├ 👑 <b>Admin Paneli:</b> Reklama, statistika va yangi versiyalar\n"
+                    " ├ 📦 <b>Yangi APK yuklash:</b> Mobil ilovani serverda darhol yangilash\n"
+                    " ├ 📊 <b>Baza statistikasi:</b> Ro'yxatdan o'tgan fermerlar va jonivorlar soni\n"
+                    " └ 🔔 <b>Azon eslatmasi:</b> Bildirishnomalarni sinovdan o'tkazish\n\n"
+                    "👇 <i>Barcha boshqaruv tugmalari pastdagi menyuda faol:</i>"
+                )
+            else:
+                welcome_text = (
+                    "╔════════════════════════════╗\n"
+                    "   🐂 <b>AI CHORVA RASMIY BOTI</b>\n"
+                    "╚════════════════════════════╝\n\n"
+                    f"👋 <b>Assalomu alaykum, {from_user.get('first_name', 'Hurmatli foydalanuvchi')}!</b>\n\n"
+                    "<b>AI Chorva</b> — chorvachilik va fermerlik tizimining rasmiy botiga xush kelibsiz!\n\n"
+                    "📲 <b>Ilovaga 0 so'm SMS xarajat bilan kirish:</b>\n"
+                    "Ilovaga xavfsiz kirish uchun pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing va 6 xonali tasdiqlash kodini oling!\n\n"
+                    "✨ <b>Imkoniyatlar:</b>\n"
+                    " ├ 🐂 Jonivorlar hisobi, vazn dinamikasi va kunlik og'im\n"
+                    " ├ 🌾 Yem ombori va kunlik ratsion taqsimoti\n"
+                    " ├ 💰 Kassa, daromad va sof foyda tahlili\n"
+                    " └ ☁️ Barcha ma'lumotlarni bulutda xavfsiz saqlash\n\n"
+                    "👇 <i>Kerakli bo'limni tanlang:</i>"
+                )
         send_telegram_msg(chat_id, welcome_text, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
         return
 
@@ -1567,8 +1708,8 @@ def handle_telegram_update(update, bot_token=None):
     # ─── ADMIN BOSHQARUV PANELI BUYRUQLARI ───
     if text.startswith("/admin") or text.startswith("/panel") or text == "👑 ADMIN BOSHQARUV PANELI":
         admin_pass = text.replace("/admin", "").replace("/panel", "").replace("👑 ADMIN BOSHQARUV PANELI", "").strip()
-        # Agar admin bo'lsa yoki ismi Fazliddin Abduraximov bo'lsa yoki admin kodi to'g'ri bo'lsa
-        if is_admin or admin_pass in ("7827", "3388", "fazliddin") or "fazliddin" in full_u_name or "фазлиддин" in full_u_name:
+        u_fn_lower = full_u_name.lower()
+        if is_admin or admin_pass in ("7827", "3388", "fazliddin") or "fazliddin" in u_fn_lower or "\u0444\u0430\u0437\u043b\u0438\u0434\u0434\u0438\u043d" in u_fn_lower:
             is_admin = True
             try: ACTIVE_ADMIN_IDS.add(int(user_id))
             except Exception: pass
@@ -1737,6 +1878,21 @@ def handle_telegram_update(update, bot_token=None):
 
 
     if text in ("👤 Mening profilim", "📊 Mening profilim", "📊 Mening hisobim"):
+        if is_admin:
+            p_text = (
+                "╭────────────────────────╮\n"
+                "   👑  <b>BOSH ADMIN PROFILI</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"👤 <b>Bosh Admin:</b> {from_user.get('first_name', 'Fazliddin')} {from_user.get('last_name', 'Abduraximov')}\n"
+                f"🆔 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+                f"📞 <b>Telefon:</b> <code>+998 97 338 78 27</code>\n"
+                f"🌐 <b>Username:</b> @{username or 'fazliddin3388'}\n"
+                "👑 <b>Tizimdagi maqomi:</b> <b>ASOSIY TIZIM BOSHQARUVCHISI</b>\n\n"
+                "🟢 <i>Sizga tizimning 100% barcha boshqaruv vakolatlari berilgan. Boshqaruv paneli doimo siz uchun ochiq!</i>"
+            )
+            send_telegram_msg(chat_id, p_text, reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+            return
+
         conn = get_db()
         c = dict_cursor(conn)
         try:
@@ -1751,31 +1907,16 @@ def handle_telegram_update(update, bot_token=None):
                     f"📞 <b>Telefon:</b> <code>{u.get('phone')}</code>\n"
                     f"🏡 <b>Ferma:</b> {u.get('farm_name') or 'Mening fermam'}\n"
                     f"🆔 <b>Fermer ID:</b> #{u.get('id')}\n"
-                    "✅ <b>Holat:</b> Bulutga ulangan (Faol)\n"
+                    "🌾 <b>Roli:</b> Fermer\n"
+                    "✅ <b>Holat:</b> Bulutga ulangan (Faol)\n\n"
+                    "🟢 <i>AI Chorva ilovasi bilan to'liq sinxronlangan.</i>"
                 )
-                if is_admin:
-                    p_text += "👑 <b>Roli:</b> <b>BOSH ADMIN</b>\n\n"
-                else:
-                    p_text += "\n"
-                p_text += "🟢 <i>AI Chorva ilovasi bilan to'liq sinxronlangan.</i>"
             else:
-                if is_admin:
-                    p_text = (
-                        "╭────────────────────────╮\n"
-                        "   👑  <b>BOSH ADMIN PROFILI</b>\n"
-                        "╰────────────────────────╯\n\n"
-                        f"👤 <b>Admin:</b> {from_user.get('first_name', 'Fazliddin')}\n"
-                        f"🆔 <b>Telegram ID:</b> <code>{user_id}</code>\n"
-                        f"🌐 <b>Username:</b> @{username}\n"
-                        "👑 <b>Roli:</b> <b>TIZIM BOSHQARUVCHISI (ADMIN)</b>\n\n"
-                        "🟢 <i>Siz tizim boshqaruvchisi hisoblanasiz. Menyuda «👑 ADMIN BOSHQARUV PANELI» mavjud!</i>"
-                    )
-                else:
-                    p_text = (
-                        "👤 <b>Siz hali tizimda ro'yxatdan o'tmagansiz.</b>\n\n"
-                        "Ilovaga kirish va profil ochish uchun pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing!"
-                    )
-            send_telegram_msg(chat_id, p_text, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+                p_text = (
+                    "👤 <b>Siz hali tizimda ro'yxatdan o'tmagansiz.</b>\n\n"
+                    "Ilovaga kirish va profil ochish uchun pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing!"
+                )
+            send_telegram_msg(chat_id, p_text, reply_markup=get_telegram_main_menu(False, is_prayer_bot), bot_token=active_token)
         finally:
             conn.close()
         return
@@ -1850,7 +1991,14 @@ def handle_telegram_update(update, bot_token=None):
         conn = get_db()
         c = conn.cursor()
         try:
-            # Foydalanuvchini tekshiramiz (telefon yoki telegram_id orqali)
+            # 1. Jadvalda role ustuni borligini kafolatlash (migratsiya)
+            try:
+                c.execute("ALTER TABLE users ADD COLUMN role VARCHAR(32) DEFAULT 'farmer'" if IS_POSTGRES else "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'farmer'")
+                conn.commit()
+            except Exception:
+                pass
+
+            # 2. Foydalanuvchini tekshiramiz (telefon yoki telegram_id orqali)
             c.execute(adapt_query("""
                 SELECT id, phone, full_name, farm_name, role FROM users 
                 WHERE phone = ? OR phone = ? OR telegram_id = ?
@@ -1888,10 +2036,10 @@ def handle_telegram_update(update, bot_token=None):
                         WHERE id = ?
                     """, (phone, first_name, user_id, username, final_role, uid))
 
-            # Sessiyani tasdiqlaymiz yoki yangi sessiya yaratamiz
+            # 3. Sessiyani tasdiqlaymiz yoki yangi sessiya yaratamiz (auth_sessions ning kaliti session_id hisoblanadi!)
             jwt_token = generate_jwt(uid, phone)
             expires_at = datetime.utcnow() + timedelta(minutes=60)
-            c.execute(adapt_query("SELECT id FROM auth_sessions WHERE telegram_id = ? OR phone = ? OR phone = ?"), (user_id, phone, raw_phone))
+            c.execute(adapt_query("SELECT session_id FROM auth_sessions WHERE telegram_id = ? OR phone = ? OR phone = ?"), (user_id, phone, raw_phone))
             sess_row = c.fetchone()
             if sess_row:
                 s_id = sess_row[0]
@@ -1899,13 +2047,13 @@ def handle_telegram_update(update, bot_token=None):
                     c.execute("""
                         UPDATE auth_sessions 
                         SET phone = %s, auth_code = %s, verified = TRUE, jwt_token = %s, user_id = %s, telegram_id = %s, expires_at = %s
-                        WHERE id = %s
+                        WHERE session_id = %s
                     """, (phone, auth_code, jwt_token, uid, user_id, expires_at, s_id))
                 else:
                     c.execute("""
                         UPDATE auth_sessions 
                         SET phone = ?, auth_code = ?, verified = 1, jwt_token = ?, user_id = ?, telegram_id = ?, expires_at = ?
-                        WHERE id = ?
+                        WHERE session_id = ?
                     """, (phone, auth_code, jwt_token, uid, user_id, expires_at, s_id))
             else:
                 session_id = "".join(random.choices(string.ascii_letters + string.digits, k=24))
@@ -1949,6 +2097,8 @@ def handle_telegram_update(update, bot_token=None):
             send_telegram_msg(chat_id, success_msg, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
         except Exception as e:
             conn.rollback()
+            import traceback
+            traceback.print_exc()
             print(f"[TG CONTACT SAVE ERR]: {e}")
             send_telegram_msg(chat_id, "Xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.", bot_token=active_token)
         finally:
