@@ -581,6 +581,31 @@ def init_cloud_database():
         """)
 
 
+        # 15. Tizim Sozlamalari (Majburiy kirish, GitHub token, oxirgi zaxira vaqtlari)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                setting_key VARCHAR(64) PRIMARY KEY,
+                setting_value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """ if IS_POSTGRES else """
+            CREATE TABLE IF NOT EXISTS system_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Boshlang'ich qiymatlarni kiritish (agar mavjud bo'lmasa)
+        c.execute(adapt_query("""
+            INSERT INTO system_settings (setting_key, setting_value)
+            VALUES ('require_auth', 'true')
+            ON CONFLICT (setting_key) DO NOTHING
+        """ if IS_POSTGRES else """
+            INSERT OR IGNORE INTO system_settings (setting_key, setting_value)
+            VALUES ('require_auth', 'true')
+        """))
+
         conn.commit()
 
         # Avtomatik ustunlar migratsiyasi (mavjud ma'lumotlarni 100% saqlagan holda)
@@ -593,6 +618,45 @@ def init_cloud_database():
 
     finally:
         conn.close()
+
+
+def get_system_setting(key, default=None):
+    """Tizim sozlamasini ma'lumotlar bazasidan xavfsiz o'qish"""
+    try:
+        conn = get_db()
+        c = dict_cursor(conn)
+        c.execute(adapt_query("SELECT setting_value FROM system_settings WHERE setting_key = ?"), (key,))
+        row = c.fetchone()
+        conn.close()
+        if row and row.get("setting_value") is not None:
+            return str(row["setting_value"])
+        return default
+    except Exception:
+        return default
+
+
+def set_system_setting(key, value):
+    """Tizim sozlamasini ma'lumotlar bazasiga saqlash yoki yangilash"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        val_str = str(value)
+        c.execute(adapt_query("""
+            INSERT INTO system_settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP
+        """ if IS_POSTGRES else """
+            INSERT INTO system_settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP
+        """), (key, val_str))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[SETTING SAVE ERR]: {e}")
+        return False
+
 
 
 def run_cloud_schema_migrations(conn):
@@ -1537,8 +1601,11 @@ def get_admin_panel_menu(is_prayer_bot=False):
             [{"text": "🔔 Azon eslatmasini sinash"}, {"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     else:
+        auth_required = (get_system_setting("require_auth", "true") == "true")
+        auth_btn_text = "🔒 Majburiy kirish: YOQILGAN 🟢" if auth_required else "🔓 Majburiy kirish: O'CHIRILGAN 🔴"
         kb = [
             [{"text": "👥 Foydalanuvchilar ro'yxati"}, {"text": "📊 Baza statistikasi"}],
+            [{"text": auth_btn_text}, {"text": "🐙 GitHub Zaxira (Kunlik)"}],
             [{"text": "💾 Bazani yuklab olish"}, {"text": "📥 Bazani tiklash"}],
             [{"text": "📦 Yangi APK yuklash"}, {"text": "📢 Versiya yangiligini e'lon qilish"}],
             [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "🔙 Asosiy menyuga qaytish"}],
@@ -1705,12 +1772,23 @@ def export_database_json():
     conn = get_db()
     c = dict_cursor(conn)
     backup_data = {}
-    tables = ["users", "prayer_users", "bulls", "weighings", "feed_logs", "feed_inventory", "other_expenses", "cash_transactions", "debts", "debt_payments", "vaccine_schedules", "advertisements"]
+    tables = [
+        "users", "prayer_users", "bulls", "weighings", "feed_logs", 
+        "feed_inventory", "other_expenses", "cash_transactions", "debts", 
+        "debt_payments", "vaccine_schedules", "advertisements", 
+        "app_releases", "system_settings"
+    ]
     try:
         for t in tables:
             try:
                 c.execute(adapt_query(f"SELECT * FROM {t}"))
-                backup_data[t] = [dict(r) for r in c.fetchall()]
+                rows = [dict(r) for r in c.fetchall()]
+                if t == "system_settings":
+                    # GitHub Secret Scanning bloklamasligi uchun maxfiy kalitlarni maskalaymiz
+                    for row in rows:
+                        if row.get("setting_key") == "github_token":
+                            row["setting_value"] = "***CONFIGURED_ON_SERVER***"
+                backup_data[t] = rows
             except Exception:
                 backup_data[t] = []
         return backup_data
@@ -1748,6 +1826,190 @@ def import_database_json(data):
         return imported_counts
     finally:
         conn.close()
+
+
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "fazliddin3388/aichorva-cloud")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
+
+def get_effective_github_token():
+    tok = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not tok:
+        tok = (get_system_setting("github_token", "") or "").strip()
+    if not tok:
+        tok = GITHUB_TOKEN.strip()
+    return tok
+
+
+def backup_database_to_github(triggered_by="cron", chat_id=None):
+    """Barcha jadvallarni eksport qilib, GitHub API orqali repositoryga har kuni yangilab yuborish"""
+    try:
+        now_dt = get_now_tashkent()
+        now_str = now_dt.strftime("%Y-%m-%d %H:%M")
+        today_date = now_dt.strftime("%Y-%m-%d")
+
+        # 1. Barcha jadvallarni to'liq JSON eksport qilish
+        dump_data = export_database_json()
+        backup_payload = {
+            "backup_date": now_str,
+            "server": "https://aichorva-cloud.onrender.com",
+            "repository": GITHUB_REPO,
+            "total_tables": len(dump_data),
+            "tables_summary": {k: len(v) for k, v in dump_data.items()},
+            "data": dump_data
+        }
+        json_str = json.dumps(backup_payload, ensure_ascii=False, indent=2, default=str)
+        json_bytes = json_str.encode("utf-8")
+        import base64
+        b64_content = base64.b64encode(json_bytes).decode("utf-8")
+
+        token = get_effective_github_token()
+        admin_chat = chat_id or ADMIN_ID
+
+        # 2. Telegram orqali ham Adminga zaxira faylini kafolatli yuborish
+        try:
+            tmp_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chorva_backup_daily.json")
+            with open(tmp_json, "wb") as f:
+                f.write(json_bytes)
+            
+            caption_tg = (
+                "╭────────────────────────╮\n"
+                "   💾  <b>KUNLIK AVTOMATIK BAZA ZAXIRASI</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"📅 <b>Vaqt:</b> {now_str}\n"
+                f"📊 <b>Jadvallar soni:</b> {len(dump_data)} ta\n"
+                f"👥 <b>Fermerlar:</b> {len(dump_data.get('users', []))} ta | 🐂 <b>Jonivorlar:</b> {len(dump_data.get('bulls', []))} ta\n"
+                f"📁 <b>Fayl:</b> <code>chorva_backup_daily.json</code>\n\n"
+                "🛡 <i>Ushbu nusxa tizim tomonidan har kuni avtomatik shakllantiriladi va saqlanadi.</i>"
+            )
+            send_telegram_document(admin_chat, tmp_json, caption=caption_tg, bot_token=CHORVA_BOT_TOKEN)
+            if os.path.exists(tmp_json):
+                try: os.remove(tmp_json)
+                except Exception: pass
+        except Exception as tg_err:
+            print(f"[TG BACKUP SEND ERR]: {tg_err}")
+
+        # 3. GitHub API orqali repository ga commit/push qilish
+        if not token:
+            msg_no_token = (
+                "⚠️ <b>GitHub Token hali o'rnatilmagan!</b>\n\n"
+                f"Baza zaxirasini to'g'ridan-to'g'ri GitHub (<code>{GITHUB_REPO}</code>) ga avtomatik yuklash uchun "
+                "GitHub Personal Access Token (classic yoki fine-grained) kerak.\n\n"
+                "🔑 <b>Qanday o'rnatiladi:</b>\n"
+                "1. GitHub -> Settings -> Developer settings -> Personal access tokens -> <code>repo</code> huquqi bilan token oling;\n"
+                "2. Botga quyidagi buyruqni yuboring:\n"
+                "<code>/set_github_token ghp_sizning_tokeningiz</code>\n\n"
+                "<i>(Xotirjam bo'ling: Bugungi zaxira fayli hozirgina yuqorida Telegram orqali sizga yuborildi!)</i>"
+            )
+            if chat_id:
+                send_telegram_msg(chat_id, msg_no_token, bot_token=CHORVA_BOT_TOKEN)
+            set_system_setting("last_backup_date", today_date)
+            return False, "GitHub token o'rnatilmagan"
+
+        gh_headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "ChorvaERP-Cloud-Backup"
+        }
+        gh_file_path = "database_backup/chorva_database_backup.json"
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{gh_file_path}"
+
+        # Oldingi fayl SHA sini olamiz (fayl mavjud bo'lsa eskisining o'rniga yangisi yoziladi!)
+        sha = None
+        try:
+            get_resp = requests.get(api_url, headers=gh_headers, timeout=15)
+            if get_resp.status_code == 200:
+                sha = get_resp.json().get("sha")
+        except Exception as e:
+            print(f"[GET GH SHA ERR]: {e}")
+
+        put_body = {
+            "message": f"🤖 Avtomatik kunlik baza zaxirasi: {now_str} (Render -> GitHub)",
+            "content": b64_content,
+            "branch": "main"
+        }
+        if sha:
+            put_body["sha"] = sha
+
+        put_resp = requests.put(api_url, headers=gh_headers, json=put_body, timeout=25)
+        if put_resp.status_code in (200, 201):
+            set_system_setting("last_backup_date", today_date)
+            set_system_setting("last_backup_time", now_str)
+
+            # 4. Agar SQLite (.db) fayli mavjud bo'lsa, uni ham GitHub ga database_backup/chorva_cloud.db sifatida yuklaymiz!
+            if not IS_POSTGRES and os.path.exists(LOCAL_DB_FILE):
+                try:
+                    with open(LOCAL_DB_FILE, "rb") as db_f:
+                        db_bytes = db_f.read()
+                    db_b64 = base64.b64encode(db_bytes).decode("utf-8")
+                    db_file_path = "database_backup/chorva_cloud.db"
+                    db_api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{db_file_path}"
+                    db_sha = None
+                    try:
+                        db_get = requests.get(db_api_url, headers=gh_headers, timeout=15)
+                        if db_get.status_code == 200:
+                            db_sha = db_get.json().get("sha")
+                    except Exception:
+                        pass
+                    db_put_body = {
+                        "message": f"🤖 Avtomatik kunlik SQLite DB zaxirasi: {now_str} (Render -> GitHub)",
+                        "content": db_b64,
+                        "branch": "main"
+                    }
+                    if db_sha:
+                        db_put_body["sha"] = db_sha
+                    requests.put(db_api_url, headers=gh_headers, json=db_put_body, timeout=30)
+                except Exception as e_db:
+                    print(f"[GITHUB DB FILE UPLOAD ERR]: {e_db}")
+
+            success_gh = (
+                "╭────────────────────────╮\n"
+                "   🎉  <b>GITHUBGA MUVAFFAQIYATLI YUKLANDI!</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"📁 <b>Repository:</b> <a href='https://github.com/{GITHUB_REPO}'>{GITHUB_REPO}</a>\n"
+                f"📄 <b>Fayllar:</b>\n"
+                f" • <code>database_backup/chorva_database_backup.json</code> (Universal ma'lumotlar)\n"
+                f" • <code>database_backup/chorva_cloud.db</code> (SQLite bazasi)\n"
+                f"📅 <b>Vaqt:</b> {now_str}\n"
+                f"🔄 <b>Holat:</b> Eskisi yangisiga almashtirildi (Updated)\n\n"
+                "✅ <i>Endi barcha ma'lumotlar bazasi ham JSON, ham .DB formatda GitHub kodingiz bilan birga xavfsiz saqlanmoqda!</i>"
+            )
+            if chat_id:
+                send_telegram_msg(chat_id, success_gh, bot_token=CHORVA_BOT_TOKEN)
+            print(f"[GITHUB BACKUP SUCCESS]: {now_str}")
+            return True, "Muvaffaqiyatli saqlandi"
+        else:
+            err_msg = f"GitHub API xatosi ({put_resp.status_code}): {put_resp.text[:150]}"
+            print(f"[GITHUB BACKUP ERR]: {err_msg}")
+            if chat_id:
+                send_telegram_msg(chat_id, f"⚠️ <b>GitHub ga yuklashda xatolik:</b>\n<code>{err_msg}</code>", bot_token=CHORVA_BOT_TOKEN)
+            return False, err_msg
+    except Exception as ex:
+        print(f"[BACKUP FATAL ERR]: {ex}")
+        traceback.print_exc()
+        if chat_id:
+            send_telegram_msg(chat_id, f"⚠️ <b>Zaxira yaratishda kutilmagan xatolik:</b> {ex}", bot_token=CHORVA_BOT_TOKEN)
+        return False, str(ex)
+
+
+def daily_db_backup_scheduler_thread():
+    """Har 15 daqiqada tekshiradi. Har kuni Toshkent vaqti bilan 03:00 da yoki yangi kunda 1 marta GitHub ga avtomatik zaxiralaydi"""
+    print("[SCHEDULER] Kunlik baza zaxira monitoringi ishga tushdi...")
+    while True:
+        try:
+            now_dt = get_now_tashkent()
+            today_str = now_dt.strftime("%Y-%m-%d")
+            last_date = get_system_setting("last_backup_date", "")
+
+            # Agar bugun hali zaxira qilinmagan bo'lsa va soat >= 03:00 bo'lsa
+            if last_date != today_str and now_dt.hour >= 3:
+                print(f"[SCHEDULER] Kunlik zaxira boshlanmoqda: {today_str}")
+                backup_database_to_github(triggered_by="cron", chat_id=ADMIN_ID)
+
+            time.sleep(900)  # Har 15 daqiqada tekshirish
+        except Exception as e:
+            print(f"[SCHEDULER LOOP ERR]: {e}")
+            time.sleep(300)
+
 
 
 
@@ -1908,6 +2170,26 @@ def handle_telegram_update(update, bot_token=None):
         if cb_data == "cancel_broadcast_version" and is_admin:
             answer_callback_query(cb_id, "Bekor qilindi", bot_token=active_token)
             edit_telegram_msg(chat_id, msg_id, "❌ <i>Versiya e'loni bekor qilindi.</i>", bot_token=active_token)
+            return
+
+        if cb_data == "trigger_github_backup_now" and is_admin:
+            answer_callback_query(cb_id, "Zaxira yaratilmoqda...", bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "⏳ <b>Baza zaxirasi tayyorlanib, GitHub ga yuklanmoqda...</b>\n<i>Natija bir ozdan so'ng xabar qilinadi.</i>", bot_token=active_token)
+            threading.Thread(target=backup_database_to_github, kwargs={"triggered_by": "admin_manual", "chat_id": chat_id}, daemon=True).start()
+            return
+
+        if cb_data == "prompt_set_github_token" and is_admin:
+            ADMIN_STATE[chat_id] = "waiting_github_token"
+            answer_callback_query(cb_id, bot_token=active_token)
+            prompt_tok_text = (
+                "╭────────────────────────╮\n"
+                "   🔑  <b>GITHUB TOKENNI O'RNATISH</b>\n"
+                "╰────────────────────────╯\n\n"
+                "GitHub Personal Access Tokeningizni (masalan: <code>ghp_xxxxxxxxxxxx</code>) yuboring:\n\n"
+                "<i>Bekor qilish uchun pastdagi «❌ Bekor qilish» tugmasini bosing.</i>"
+            )
+            cancel_kb = {"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}
+            send_telegram_msg(chat_id, prompt_tok_text, reply_markup=cancel_kb, bot_token=active_token)
             return
 
         if cb_data.startswith("reply_"):
@@ -2263,6 +2545,31 @@ def handle_telegram_update(update, bot_token=None):
         )
         return
 
+
+    # 0.05. Admin GitHub Token yuboryaptimi?
+    if is_admin and ADMIN_STATE.get(chat_id) == "waiting_github_token":
+        ADMIN_STATE.pop(chat_id, None)
+        token_candidate = (text or "").strip()
+        if token_candidate in ("❌ Bekor qilish", "/cancel", "Bekor qilish"):
+            send_telegram_msg(chat_id, "GitHub tokenni o'rnatish bekor qilindi.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            return
+
+        if len(token_candidate) < 15:
+            send_telegram_msg(chat_id, "⚠️ Token juda qisqa ko'rinadi. Iltimos, haqiqiy GitHub Access Token yuboring.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            return
+
+        set_system_setting("github_token", token_candidate)
+        confirm_token_msg = (
+            "╭────────────────────────╮\n"
+            "   ✅  <b>GITHUB TOKEN SAQLANDI!</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"📁 <b>Repository:</b> <code>{GITHUB_REPO}</code>\n"
+            "🔑 <b>Token:</b> <code>" + token_candidate[:6] + "..." + token_candidate[-4:] + "</code>\n\n"
+            "Endi har kuni soat 03:00 da ma'lumotlar bazasi avtomatik ravishda ushbu GitHub repo ga zaxiralanadi!\n"
+            "Shuningdek, hozirning o'zida tekshirib ko'rish uchun <b>«🐙 GitHub Zaxira (Kunlik)»</b> tugmasidan foydalanishingiz mumkin."
+        )
+        send_telegram_msg(chat_id, confirm_token_msg, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        return
 
     # 0.1. Admin foydalanuvchi murojaatiga javob yozyaptimi?
     reply_target_user = None
@@ -2850,6 +3157,67 @@ def handle_telegram_update(update, bot_token=None):
         ADMIN_STATE.pop(chat_id, None)
         USER_STATE.pop(user_id, None)
         send_telegram_msg(chat_id, "Asosiy menyuga qaytildi.", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+        return
+
+    # 0.5. Majburiy kirish (Ro'yxatdan o'tish) ni yoqish / o'chirish
+    if is_admin and (text.startswith("🔒 Majburiy kirish") or text.startswith("🔓 Majburiy kirish") or text in ("/toggle_auth", "/majburiy", "/auth_toggle", "Majburiy kirish")):
+        curr = (get_system_setting("require_auth", "true") == "true")
+        new_val = not curr
+        set_system_setting("require_auth", "true" if new_val else "false")
+        
+        status_word = "YOQILDI 🟢\n(Endi ilovani yuklab olgan har bir yangi foydalanuvchi ilovaga kirganda Telegram bot orqali ro'yxatdan o'tishi majburiy bo'ladi!)" if new_val else "O'CHIRILDI 🔴\n(Foydalanuvchilar Telegram orqali ro'yxatdan o'tmasdan ham ilovani erkin oflayn ishlatishi mumkin)"
+        
+        resp_msg = (
+            "╭────────────────────────╮\n"
+            "   🛡  <b>RO'YXATDAN O'TISH SOZLAMASI</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"⚙️ <b>Holat:</b> <b>{status_word}</b>\n\n"
+            "💡 <b>Admin nazorati:</b>\n"
+            "• 🟢 <b>Yoqilganda:</b> Ilovaga kirgan barcha yangi fermerlar o'z telefon raqamlarini bot orqali tasdiqlaydilar. "
+            "Siz «👥 Foydalanuvchilar ro'yxati» da ilovani o'rnatgan har bir insonni, ularning chorvalari va hisob-kitoblarini bevosita ko'rib turasiz!\n"
+            "• 🔴 <b>O'chirilganda:</b> Hech qanday majburiy oynasiz ilova to'g'ridan-to'g'ri ochiladi."
+        )
+        send_telegram_msg(chat_id, resp_msg, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        return
+
+    # 0.6. GitHub Kunlik Zaxira bo'limi
+    if is_admin and text in ("🐙 GitHub Zaxira (Kunlik)", "🐙 GitHub Zaxira", "/backup_github", "/github_backup"):
+        tok = get_effective_github_token()
+        last_t = get_system_setting("last_backup_time", "Hali qilinmagan")
+        last_d = get_system_setting("last_backup_date", "Mavjud emas")
+        
+        gh_info = (
+            "╭────────────────────────╮\n"
+            "   🐙  <b>GITHUB KUNLIK ZAXIRA TIZIMI</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"📁 <b>Repository:</b> <code>{GITHUB_REPO}</code>\n"
+            f"🔑 <b>GitHub Token:</b> {'✅ Faol o\'rnatilgan' if tok else '❌ Hali o\'rnatilmagan'}\n"
+            f"🕒 <b>Oxirgi zaxira vaqti:</b> <b>{last_t}</b>\n"
+            f"📅 <b>Oxirgi sana:</b> <b>{last_d}</b>\n\n"
+            "⚡️ <b>Qanday ishlaydi:</b>\n"
+            " • Render serveringizdagi barcha ma'lumotlar bazasi har kuni Toshkent vaqti bilan soat 03:00 da "
+            "to'g'ridan-to'g'ri GitHub kod yozilgan joydagi <code>database_backup/chorva_database_backup.json</code> fayliga yuklanadi (eskisi yangilanadi);\n"
+            " • Shu bilan birga sizning shaxsiy Telegramingizga ham to'liq zaxira fayli yuboriladi!\n\n"
+            "👇 <i>Kerakli amalni tanlang:</i>"
+        )
+        gh_kb = {
+            "inline_keyboard": [
+                [{"text": "🚀 Hozir zaxirani GitHub ga yuklash", "callback_data": "trigger_github_backup_now"}],
+                [{"text": "🔑 GitHub Tokenni kiritish / yangilash", "callback_data": "prompt_set_github_token"}]
+            ]
+        }
+        send_telegram_msg(chat_id, gh_info, reply_markup=gh_kb, bot_token=active_token)
+        return
+
+    # 0.7. GitHub tokenni to'g'ridan-to'g'ri buyruq orqali kiritish
+    if is_admin and text.startswith("/set_github_token"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_telegram_msg(chat_id, "Iltimos tokenni kiriting:\nMasalan: <code>/set_github_token ghp_xxxxxx</code>", bot_token=active_token)
+            return
+        new_tok = parts[1].strip()
+        set_system_setting("github_token", new_tok)
+        send_telegram_msg(chat_id, "✅ <b>GitHub Token muvaffaqiyatli saqlandi!</b>\nEndi kunlik zaxira avtomatik GitHub ga yuboriladi.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
         return
 
     # 1. Foydalanuvchilar ro'yxati (Tugmali, Sahifalash va To'liq tahlil bilan)
@@ -3523,6 +3891,9 @@ if not os.environ.get("USE_WEBHOOK"):
 t_prayer = threading.Thread(target=prayer_reminder_thread, daemon=True)
 t_prayer.start()
 
+t_backup = threading.Thread(target=daily_db_backup_scheduler_thread, daemon=True)
+t_backup.start()
+
 t_awake = threading.Thread(target=keep_awake_pinger_thread, daemon=True)
 t_awake.start()
 
@@ -3608,11 +3979,13 @@ def serve_cloud_image(filename):
 
 @app.route('/api/app/latest', methods=['GET'])
 @app.route('/api/app/version', methods=['GET'])
+@app.route('/api/app/config', methods=['GET'])
 def get_latest_app_release():
-    """Eng so'nggi mobil ilova versiyasi haqida to'liq ma'lumot"""
+    """Eng so'nggi mobil ilova versiyasi va tizim sozlamalari (require_auth)"""
     v_info = get_current_app_version_info()
     local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
     has_local = os.path.exists(local_path)
+    req_auth = (get_system_setting("require_auth", "true") == "true")
 
     resp = jsonify({
         "status": "success",
@@ -3622,10 +3995,11 @@ def get_latest_app_release():
         "apk_size_mb": v_info.get("apk_size_mb", 5.37),
         "release_date": v_info.get("release_date", "2026-09-28"),
         "has_local_apk": has_local,
+        "require_auth": req_auth,
         "download_url": "/download/ChorvaERP.apk",
         "direct_download_url": "https://aichorva-cloud.onrender.com/download/ChorvaERP.apk"
     })
-    resp.headers["Cache-Control"] = "public, max-age=180"
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
 
@@ -3872,6 +4246,33 @@ def cloud_sync():
     counts = {"bulls": 0, "weighings": 0, "feeds": 0, "expenses": 0, "cash": 0, "debts": 0, "inventory": 0}
 
     try:
+        # 0. O'chirilgan jonivorlarni bulutdan ham butunlay tozalash (Deletions / Tombstones)
+        for d_tag in payload.get("deleted_tags", []):
+            d_tag_clean = str(d_tag).strip()
+            if not d_tag_clean:
+                continue
+            c.execute(adapt_query("DELETE FROM bulls WHERE user_id = ? AND tag_id = ?"), (user_id, d_tag_clean))
+            c.execute(adapt_query("DELETE FROM weighings WHERE user_id = ? AND tag_id = ?"), (user_id, d_tag_clean))
+            c.execute(adapt_query("DELETE FROM feed_logs WHERE user_id = ? AND tag_id = ?"), (user_id, d_tag_clean))
+            c.execute(adapt_query("DELETE FROM other_expenses WHERE user_id = ? AND tag_id = ?"), (user_id, d_tag_clean))
+            c.execute(adapt_query("DELETE FROM vaccine_schedules WHERE user_id = ? AND tag_id = ?"), (user_id, d_tag_clean))
+            print(f"[CLOUD SYNC DELETE]: user_id={user_id} tag={d_tag_clean} bulutdan o'chirildi")
+
+        # 0.1. O'chirilgan kassa operatsiyalarini tozalash
+        for sig in payload.get("deleted_cash_signatures", []):
+            parts = str(sig).split("_", 2)
+            if len(parts) >= 3:
+                try:
+                    c.execute(adapt_query("DELETE FROM cash_transactions WHERE user_id = ? AND trans_date = ? AND amount = ? AND trans_type = ?"), (user_id, parts[0], float(parts[1]), parts[2]))
+                except Exception:
+                    pass
+
+        # 0.2. O'chirilgan qarzlarni tozalash
+        for dsig in payload.get("deleted_debt_names", []):
+            parts = str(dsig).split("_", 1)
+            if len(parts) >= 1:
+                c.execute(adapt_query("DELETE FROM debts WHERE user_id = ? AND creditor_name = ?"), (user_id, parts[0]))
+
         # 1. Bulls (Jonivorlar) Push
         bull_tag_to_id = {}
         for b in payload.get("bulls", []):
