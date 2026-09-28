@@ -3186,12 +3186,13 @@ def handle_telegram_update(update, bot_token=None):
         last_t = get_system_setting("last_backup_time", "Hali qilinmagan")
         last_d = get_system_setting("last_backup_date", "Mavjud emas")
         
+        tok_status = "✅ Faol o'rnatilgan" if tok else "❌ Hali o'rnatilmagan"
         gh_info = (
             "╭────────────────────────╮\n"
             "   🐙  <b>GITHUB KUNLIK ZAXIRA TIZIMI</b>\n"
             "╰────────────────────────╯\n\n"
             f"📁 <b>Repository:</b> <code>{GITHUB_REPO}</code>\n"
-            f"🔑 <b>GitHub Token:</b> {'✅ Faol o\'rnatilgan' if tok else '❌ Hali o\'rnatilmagan'}\n"
+            f"🔑 <b>GitHub Token:</b> {tok_status}\n"
             f"🕒 <b>Oxirgi zaxira vaqti:</b> <b>{last_t}</b>\n"
             f"📅 <b>Oxirgi sana:</b> <b>{last_d}</b>\n\n"
             "⚡️ <b>Qanday ishlaydi:</b>\n"
