@@ -1079,11 +1079,19 @@ def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
 
 def send_lenta_guide(chat_id, animal="menu", bot_token=None):
     """Torozisiz vazn o'lchash rasmli diagrammalari va hisob-kitob yo'riqnomasi"""
-    img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    img_dir = os.path.join(root_dir, "img")
     tok = bot_token or CHORVA_BOT_TOKEN
 
+    def resolve_img(fname):
+        p1 = os.path.join(img_dir, fname)
+        if os.path.exists(p1): return p1
+        p2 = os.path.join(root_dir, fname)
+        if os.path.exists(p2): return p2
+        return p1
+
     if animal == "cattle":
-        photo_path = os.path.join(img_dir, "bull_measure.jpg")
+        photo_path = resolve_img("bull_measure.jpg")
         caption = (
             "╭────────────────────────╮\n"
             "   🐂  <b>QORAMOL VA BUQA VAZNINI O'LCHASH</b>\n"
@@ -1108,7 +1116,7 @@ def send_lenta_guide(chat_id, animal="menu", bot_token=None):
         send_telegram_photo(chat_id, photo_path, caption=caption, reply_markup=kb, bot_token=tok)
 
     elif animal == "sheep":
-        photo_path = os.path.join(img_dir, "sheep_measure.jpg")
+        photo_path = resolve_img("sheep_measure.jpg")
         caption = (
             "╭────────────────────────╮\n"
             "   🐑  <b>QO'Y VA QO'CHQOR VAZNINI O'LCHASH</b>\n"
@@ -1131,7 +1139,7 @@ def send_lenta_guide(chat_id, animal="menu", bot_token=None):
         send_telegram_photo(chat_id, photo_path, caption=caption, reply_markup=kb, bot_token=tok)
 
     elif animal == "horse":
-        photo_path = os.path.join(img_dir, "horse_measure.jpg")
+        photo_path = resolve_img("horse_measure.jpg")
         caption = (
             "╭────────────────────────╮\n"
             "   🐎  <b>OT VA YILQI VAZNINI O'LCHASH</b>\n"
@@ -1586,6 +1594,12 @@ def handle_telegram_update(update, bot_token=None):
         if cb_data == "u_close":
             answer_callback_query(cb_id, bot_token=active_token)
             edit_telegram_msg(chat_id, msg_id, "👥 <i>Foydalanuvchilar ro'yxati yopildi.</i>", reply_markup=None, bot_token=active_token)
+            return
+
+        if cb_data in ("lenta_cattle", "lenta_sheep", "lenta_horse"):
+            answer_callback_query(cb_id, bot_token=active_token)
+            an_type = cb_data.replace("lenta_", "")
+            send_lenta_guide(chat_id, animal=an_type, bot_token=active_token)
             return
 
         if cb_data.startswith("lenta_calc"):
@@ -3060,10 +3074,14 @@ def download_latest_apk():
 @app.route('/img/<path:filename>', methods=['GET'])
 def serve_cloud_image(filename):
     """Lenta va tarozi diagrammalari hamda ilova rasmlarini uzatish"""
-    img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    img_dir = os.path.join(root_dir, "img")
     target = os.path.join(img_dir, filename)
     if os.path.exists(target):
         return send_file(target, mimetype="image/jpeg")
+    target_root = os.path.join(root_dir, filename)
+    if os.path.exists(target_root):
+        return send_file(target_root, mimetype="image/jpeg")
     return jsonify({"error": "Image not found"}), 404
 
 
