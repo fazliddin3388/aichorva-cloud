@@ -1,0 +1,54 @@
+{
+  "backup_date": "2026-09-28 15:22",
+  "server": "https://aichorva-cloud.onrender.com",
+  "repository": "fazliddin3388/aichorva-cloud",
+  "total_tables": 14,
+  "tables_summary": {
+    "users": 0,
+    "prayer_users": 0,
+    "bulls": 0,
+    "weighings": 0,
+    "feed_logs": 0,
+    "feed_inventory": 0,
+    "other_expenses": 0,
+    "cash_transactions": 0,
+    "debts": 0,
+    "debt_payments": 0,
+    "vaccine_schedules": 0,
+    "advertisements": 0,
+    "app_releases": 0,
+    "system_settings": 3
+  },
+  "data": {
+    "users": [],
+    "prayer_users": [],
+    "bulls": [],
+    "weighings": [],
+    "feed_logs": [],
+    "feed_inventory": [],
+    "other_expenses": [],
+    "cash_transactions": [],
+    "debts": [],
+    "debt_payments": [],
+    "vaccine_schedules": [],
+    "advertisements": [],
+    "app_releases": [],
+    "system_settings": [
+      {
+        "setting_key": "require_auth",
+        "setting_value": "true",
+        "updated_at": "2026-09-28 10:04:47"
+      },
+      {
+        "setting_key": "last_backup_date",
+        "setting_value": "2026-09-28",
+        "updated_at": "2026-09-28 10:04:54"
+      },
+      {
+        "setting_key": "github_token",
+        "setting_value": "***CONFIGURED_ON_SERVER***",
+        "updated_at": "2026-09-28 10:21:31"
+      }
+    ]
+  }
+}
