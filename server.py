@@ -908,7 +908,16 @@ def send_telegram_document(chat_id, document, caption=None, reply_markup=None, b
     if isinstance(document, str) and os.path.exists(document):
         try:
             with open(document, "rb") as f_obj:
-                files = {"document": (os.path.basename(document), f_obj, "application/vnd.android.package-archive")}
+                ext = os.path.splitext(document)[1].lower()
+                if ext == ".apk":
+                    mime_type = "application/vnd.android.package-archive"
+                elif ext in (".db", ".sqlite", ".sqlite3"):
+                    mime_type = "application/x-sqlite3"
+                elif ext == ".json":
+                    mime_type = "application/json"
+                else:
+                    mime_type = "application/octet-stream"
+                files = {"document": (os.path.basename(document), f_obj, mime_type)}
                 data = {"chat_id": chat_id, "parse_mode": "HTML"}
                 if caption: data["caption"] = caption
                 if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
@@ -953,6 +962,43 @@ def send_telegram_document(chat_id, document, caption=None, reply_markup=None, b
                     return r3.json().get("result")
     except Exception as e:
         print(f"[TG DOC EXCEPTION]: {e}")
+    return None
+
+
+def send_telegram_photo(chat_id, photo, caption=None, reply_markup=None, bot_token=None):
+    """Telegram orqali rasm yuborish (Mahalliy fayl yoki file_id)"""
+    tok = bot_token or CHORVA_BOT_TOKEN
+    if not tok:
+        return None
+    url = f"https://api.telegram.org/bot{tok}/sendPhoto"
+
+    # 1. Agar photo diskdagi mahalliy fayl bo'lsa
+    if isinstance(photo, str) and os.path.exists(photo):
+        try:
+            with open(photo, "rb") as f_obj:
+                files = {"photo": (os.path.basename(photo), f_obj, "image/jpeg")}
+                data = {"chat_id": chat_id, "parse_mode": "HTML"}
+                if caption: data["caption"] = caption
+                if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+                r = requests.post(url, data=data, files=files, timeout=35)
+                if r.status_code == 200:
+                    return r.json().get("result")
+                print(f"[TG PHOTO FILE ERR]: status={r.status_code} body={r.text}")
+        except Exception as e:
+            print(f"[TG PHOTO EXCEPTION]: {e}")
+            return None
+
+    # 2. Agar photo file_id yoki URL bo'lsa
+    payload = {"chat_id": chat_id, "photo": photo, "parse_mode": "HTML"}
+    if caption: payload["caption"] = caption
+    if reply_markup: payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(url, json=payload, timeout=25)
+        if r.status_code == 200:
+            return r.json().get("result")
+        print(f"[TG PHOTO ERR]: status={r.status_code} body={r.text}")
+    except Exception as e:
+        print(f"[TG PHOTO ERR]: {e}")
     return None
 
 
@@ -1012,23 +1058,118 @@ def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
             # 👑 Bosh Admin uchun to'liq boshqaruv menyusi (ro'yxatdan o'tish yoki adminga murojaat ko'rinmaydi)
             kb = [
                 [{"text": "👑 ADMIN BOSHQARUV PANELI"}],
-                [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "🐂 AI Chorva haqida"}],
-                [{"text": "👤 Mening profilim"}, {"text": "📊 Baza statistikasi"}],
-                [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "📦 Yangi APK yuklash"}],
-                [{"text": "❓ Qo'llanma va Yordam"}],
+                [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "📏 Torozisiz vazn o'lchash"}],
+                [{"text": "🐂 AI Chorva haqida"}, {"text": "👤 Mening profilim"}],
+                [{"text": "📊 Baza statistikasi"}, {"text": "📦 Yangi APK yuklash"}],
+                [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "❓ Qo'llanma va Yordam"}],
             ]
         else:
             # 🌾 Oddiy fermer (foydalanuvchi) ko'rinishi
             kb = [
                 [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}],
-                [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "🐂 AI Chorva haqida"}],
-                [{"text": "👤 Mening profilim"}, {"text": "✍️ Adminga murojaat"}],
-                [{"text": "❓ Qo'llanma va Yordam"}],
+                [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "📏 Torozisiz vazn o'lchash"}],
+                [{"text": "🐂 AI Chorva haqida"}, {"text": "👤 Mening profilim"}],
+                [{"text": "✍️ Adminga murojaat"}, {"text": "❓ Qo'llanma va Yordam"}],
             ]
     return {
         "keyboard": kb,
         "resize_keyboard": True
     }
+
+
+def send_lenta_guide(chat_id, animal="menu", bot_token=None):
+    """Torozisiz vazn o'lchash rasmli diagrammalari va hisob-kitob yo'riqnomasi"""
+    img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+    tok = bot_token or CHORVA_BOT_TOKEN
+
+    if animal == "cattle":
+        photo_path = os.path.join(img_dir, "bull_measure.jpg")
+        caption = (
+            "╭────────────────────────╮\n"
+            "   🐂  <b>QORAMOL VA BUQA VAZNINI O'LCHASH</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Yuqoridagi diagrammada ko'rsatilgan 2 ta o'lchovni oling:\n\n"
+            "🔴 <b>A (Ko'krak aylanasi):</b> Old oyoqlar orqasidan (kurak orqasidan) ko'krak qafasi aylanasi (sm da).\n"
+            "🔵 <b>B (Tana uzunligi):</b> Kurak-yelka bo'g'imidan to orqa dum suyagi bo'rtig'igacha bo'lgan masofa (sm da).\n\n"
+            "🧮 <b>Formula (Truxanovskiy):</b>\n"
+            "<code>Vazn (kg) = (A × B) ÷ 50</code>\n"
+            "<i>• Juda semiz / bo'rdoqi bo'lsa: +10% qo'shiladi</i>\n"
+            "<i>• Ozg'in bo'lsa: -10% ayiriladi</i>\n\n"
+            "💡 <b>Misol:</b> A=180 sm, B=155 sm bo'lsa:\n"
+            "(180 × 155) ÷ 50 = <b>558 kg</b> tirik vazn!\n"
+            "🥩 <i>Taxminiy sof go'sht: ~312 kg (56%)</i>"
+        )
+        kb = {
+            "inline_keyboard": [
+                [{"text": "🐑 Qo'yni ko'rish", "callback_data": "lenta_sheep"}, {"text": "🐎 Otni ko'rish", "callback_data": "lenta_horse"}],
+                [{"text": "🧮 Buqa vaznini hisoblash", "callback_data": "lenta_calc_cattle"}]
+            ]
+        }
+        send_telegram_photo(chat_id, photo_path, caption=caption, reply_markup=kb, bot_token=tok)
+
+    elif animal == "sheep":
+        photo_path = os.path.join(img_dir, "sheep_measure.jpg")
+        caption = (
+            "╭────────────────────────╮\n"
+            "   🐑  <b>QO'Y VA QO'CHQOR VAZNINI O'LCHASH</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Qo'y va qo'chqorlar (Hisori, Arashan, Jaydari) uchun o'lchash:\n\n"
+            "🔴 <b>A (Ko'krak aylanasi):</b> Old oyoqlari orqasidan ko'krak qafasi aylanasi (sm da, junini biroz bosib).\n"
+            "🔵 <b>B (Tana uzunligi):</b> Kurak suyagidan to dum ildizigacha bo'lgan to'g'ri masofa (sm da).\n\n"
+            "🧮 <b>Formula:</b>\n"
+            "<code>Vazn (kg) = (A² × B) ÷ 10800</code>\n\n"
+            "💡 <b>Misol:</b> A=95 sm, B=82 sm bo'lsa:\n"
+            "(95 × 95 × 82) ÷ 10800 = <b>68.5 kg</b>!\n"
+            "🥩 <i>Taxminiy sof go'sht: ~35 kg (50%)</i>"
+        )
+        kb = {
+            "inline_keyboard": [
+                [{"text": "🐂 Qoramolni ko'rish", "callback_data": "lenta_cattle"}, {"text": "🐎 Otni ko'rish", "callback_data": "lenta_horse"}],
+                [{"text": "🧮 Qo'y vaznini hisoblash", "callback_data": "lenta_calc_sheep"}]
+            ]
+        }
+        send_telegram_photo(chat_id, photo_path, caption=caption, reply_markup=kb, bot_token=tok)
+
+    elif animal == "horse":
+        photo_path = os.path.join(img_dir, "horse_measure.jpg")
+        caption = (
+            "╭────────────────────────╮\n"
+            "   🐎  <b>OT VA YILQI VAZNINI O'LCHASH</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Ot va toychoqlar uchun Kerroll va Xantington standarti:\n\n"
+            "🔴 <b>A (Ko'krak aylanasi):</b> Yag'rina ustidan va old tirsak orqasidan ko'krak aylanasi (sm da).\n"
+            "🔵 <b>B (Tana uzunligi):</b> Yelka suyagidan to orqa dumba suyagi bo'rtig'igacha bo'lgan masofa (sm da).\n\n"
+            "🧮 <b>Formula:</b>\n"
+            "<code>Vazn (kg) = (A² × B) ÷ 11877</code>\n\n"
+            "💡 <b>Misol:</b> A=185 sm, B=160 sm bo'lsa:\n"
+            "(185 × 185 × 160) ÷ 11877 = <b>460 kg</b> tirik vazn!"
+        )
+        kb = {
+            "inline_keyboard": [
+                [{"text": "🐂 Qoramolni ko'rish", "callback_data": "lenta_cattle"}, {"text": "🐑 Qo'yni ko'rish", "callback_data": "lenta_sheep"}],
+                [{"text": "🧮 Ot vaznini hisoblash", "callback_data": "lenta_calc_horse"}]
+            ]
+        }
+        send_telegram_photo(chat_id, photo_path, caption=caption, reply_markup=kb, bot_token=tok)
+
+    else:
+        intro_text = (
+            "╭────────────────────────╮\n"
+            "   📏  <b>TOROZISIS VAZNNI O'LCHASH</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Chorvachilikda oddiy santimetr (ruletka) lentasi orqali tirik vaznni 95–97% aniqlikda bilish mumkin!\n\n"
+            "👇 <b>Qaysi jonivorning o'lchash diagrammasini ko'rmoqchisiz?</b>\n"
+            "Tugmani bosing — bot sizga barcha chiziqlari ko'rsatilgan rasmli qo'llanmani yuboradi:"
+        )
+        kb = {
+            "inline_keyboard": [
+                [{"text": "🐂 Qoramol / Bo'rdoqi Buqa", "callback_data": "lenta_cattle"}],
+                [{"text": "🐑 Qo'y va Qo'chqor", "callback_data": "lenta_sheep"}],
+                [{"text": "🐎 Ot va Yilqi", "callback_data": "lenta_horse"}],
+                [{"text": "🧮 Botda hisob-kitob qilish", "callback_data": "lenta_calc"}]
+            ]
+        }
+        send_telegram_msg(chat_id, intro_text, reply_markup=kb, bot_token=tok)
 
 
 def get_admin_panel_menu(is_prayer_bot=False):
@@ -1040,14 +1181,216 @@ def get_admin_panel_menu(is_prayer_bot=False):
         ]
     else:
         kb = [
-            [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "📊 Baza statistikasi"}],
-            [{"text": "📦 Yangi APK yuklash"}, {"text": "👥 Foydalanuvchilar ro'yxati"}],
+            [{"text": "👥 Foydalanuvchilar ro'yxati"}, {"text": "📊 Baza statistikasi"}],
+            [{"text": "💾 Bazani yuklab olish"}, {"text": "📥 Bazani tiklash"}],
+            [{"text": "📦 Yangi APK yuklash"}, {"text": "📣 Reklama / E'lon yuborish"}],
             [{"text": "🔔 Azon eslatmasini sinash"}, {"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     return {
         "keyboard": kb,
         "resize_keyboard": True
     }
+
+
+def format_user_list_keyboard(page=1, per_page=6):
+    """Foydalanuvchilar ro'yxati, ularning chorvalari va sarmoyalari (Sahifalash bilan)"""
+    conn = get_db()
+    c = dict_cursor(conn)
+    try:
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM users"))
+        row_cnt = c.fetchone()
+        total_count = row_cnt["cnt"] if row_cnt else 0
+        total_pages = max(1, (total_count + per_page - 1) // per_page)
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * per_page
+
+        c.execute(adapt_query("""
+            SELECT u.id, u.phone, u.full_name, u.farm_name, u.role,
+                   (SELECT COUNT(*) FROM bulls WHERE user_id = u.id) as bull_cnt,
+                   (SELECT COALESCE(SUM(amount), 0) FROM cash_transactions WHERE user_id = u.id AND trans_type = 'capital') as capital_amt
+            FROM users u
+            ORDER BY u.id DESC
+            LIMIT ? OFFSET ?
+        """), (per_page, offset))
+        users = c.fetchall()
+
+        inline_kb = []
+        for u in users:
+            name = (u.get("full_name") or u.get("phone") or f"Fermer #{u.get('id')}").strip()
+            if len(name) > 14:
+                name = name[:12] + "…"
+            bulls = u.get("bull_cnt") or 0
+            cap_val = float(u.get("capital_amt") or 0)
+            if cap_val >= 1_000_000_000:
+                cap_str = f"{cap_val/1_000_000_000:.1f} mlrd"
+            elif cap_val >= 1_000_000:
+                cap_str = f"{cap_val/1_000_000:.1f} mln"
+            elif cap_val > 0:
+                cap_str = f"{int(cap_val):,} so'm".replace(",", " ")
+            else:
+                cap_str = "0"
+
+            btn_text = f"👤 {name} | 🐂 {bulls} ta | 💰 {cap_str}"
+            inline_kb.append([{"text": btn_text, "callback_data": f"u_view_{u['id']}_{page}"}])
+
+        # Sahifalash (Pagination) tugmalari
+        nav_row = []
+        if page > 1:
+            nav_row.append({"text": "◀️ Oldingi", "callback_data": f"u_page_{page - 1}"})
+        nav_row.append({"text": f"📄 {page} / {total_pages}", "callback_data": f"u_page_{page}"})
+        if page < total_pages:
+            nav_row.append({"text": "Keyingi ▶️", "callback_data": f"u_page_{page + 1}"})
+        if nav_row:
+            inline_kb.append(nav_row)
+
+        inline_kb.append([
+            {"text": "🔄 Yangilash", "callback_data": f"u_page_{page}"},
+            {"text": "🔙 Yopish", "callback_data": "u_close"}
+        ])
+
+        summary_text = (
+            "╭────────────────────────╮\n"
+            "   👥  <b>FOYDALANUVCHILAR RO'YXATI</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"📊 <b>Jami ro'yxatdan o'tganlar:</b> <b>{total_count} ta</b> fermer\n"
+            f"📄 <b>Sahifa:</b> <b>{page} / {total_pages}</b>\n\n"
+            "👇 <i>Fermer haqida to'liq hisobotni ko'rish uchun uning tugmasini bosing:</i>"
+        )
+        return summary_text, {"inline_keyboard": inline_kb}
+    finally:
+        conn.close()
+
+
+def format_user_details(user_id, return_page=1):
+    """Bitta fermerning to'liq moliyaviy va chorva hisoboti kartochkasi"""
+    conn = get_db()
+    c = dict_cursor(conn)
+    try:
+        c.execute(adapt_query("SELECT id, phone, full_name, farm_name, role, telegram_id, telegram_username, is_verified, created_at FROM users WHERE id = ?"), (user_id,))
+        u = c.fetchone()
+        if not u:
+            return "Foydalanuvchi topilmadi.", {"inline_keyboard": [[{"text": "🔙 Ro'yxatga qaytish", "callback_data": f"u_page_{return_page}"}]]}
+
+        # Jonivorlar statistikasi
+        c.execute(adapt_query("SELECT COUNT(*) as total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='sold' THEN 1 ELSE 0 END) as sold FROM bulls WHERE user_id = ?"), (user_id,))
+        b_stat = c.fetchone()
+        b_total = (b_stat["total"] or 0) if b_stat else 0
+        b_active = (b_stat["active"] or 0) if b_stat else 0
+        b_sold = (b_stat["sold"] or 0) if b_stat else 0
+
+        # O'lchovlar soni
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM weighings WHERE user_id = ?"), (user_id,))
+        w_cnt = (c.fetchone()["cnt"] or 0)
+
+        # Kassa balansi va sarmoya
+        c.execute(adapt_query("SELECT trans_type, SUM(amount) as s FROM cash_transactions WHERE user_id = ? GROUP BY trans_type"), (user_id,))
+        cash_rows = c.fetchall()
+        cap_amt = 0.0
+        income_amt = 0.0
+        expense_amt = 0.0
+        for cr in cash_rows:
+            ttype = cr.get("trans_type")
+            val = float(cr.get("s") or 0)
+            if ttype == 'capital': cap_amt += val
+            elif ttype in ('sale', 'income', 'capital_withdraw'): income_amt += val
+            else: expense_amt += val
+        kassa_balance = (cap_amt + income_amt) - expense_amt
+
+        # Qarzlar
+        c.execute(adapt_query("SELECT COALESCE(SUM(remaining_amount), 0) as s FROM debts WHERE user_id = ? AND status != 'paid'"), (user_id,))
+        debt_amt = float(c.fetchone()["s"] or 0)
+
+        # Yem ombori turlari
+        c.execute(adapt_query("SELECT COUNT(*) as cnt, COALESCE(SUM(current_stock_kg), 0) as stock FROM feed_inventory WHERE user_id = ?"), (user_id,))
+        f_inv = c.fetchone()
+        feed_types_cnt = (f_inv["cnt"] or 0) if f_inv else 0
+        feed_stock_kg = float(f_inv["stock"] or 0) if f_inv else 0.0
+
+        created_str = str(u.get("created_at") or "")[:16] or "Noma'lum"
+
+        cap_fmt = f"{int(cap_amt):,} so'm".replace(",", " ")
+        kassa_fmt = f"{int(kassa_balance):,} so'm".replace(",", " ")
+        feed_fmt = f"{int(feed_stock_kg):,} kg".replace(",", " ")
+        debt_fmt = f"{int(debt_amt):,} so'm".replace(",", " ")
+
+        card = (
+            f"╭────────────────────────╮\n"
+            f"   👤  <b>FERMER PROFILI: #{u['id']}</b>\n"
+            f"╰────────────────────────╯\n\n"
+            f"👤 <b>Ismi:</b> <b>{u.get('full_name') or 'Kiritilmagan'}</b>\n"
+            f"📞 <b>Telefon raqami:</b> <code>{u.get('phone') or 'Mavjud emas'}</code>\n"
+            f"🏡 <b>Ferma nomi:</b> <b>{u.get('farm_name') or 'Mavjud emas'}</b>\n"
+            f"🌐 <b>Telegram:</b> @{u.get('telegram_username') or 'mavjud_emas'} (ID: <code>{u.get('telegram_id') or '—'}</code>)\n"
+            f"🛡 <b>Maqomi (Rol):</b> <b>{u.get('role') or 'farmer'}</b>\n"
+            f"📅 <b>Ro'yxatdan o'tgan:</b> {created_str}\n\n"
+            f"📊 <b>FERMA HISOBOTI:</b>\n"
+            f" ├ 🐂 <b>Jonivorlar:</b> Jami <b>{b_total} ta</b> (🟢 Faol: {b_active} ta | 🏷 Sotilgan: {b_sold} ta)\n"
+            f" ├ ⚖️ <b>Tarozi o'lchovlari:</b> <b>{w_cnt} ta</b>\n"
+            f" ├ 💰 <b>Kiritilgan sarmoya:</b> <b>{cap_fmt}</b>\n"
+            f" ├ 💵 <b>Kassa qoldig'i:</b> <b>{kassa_fmt}</b>\n"
+            f" ├ 🌾 <b>Yem ombori:</b> {feed_types_cnt} xil (Jami {feed_fmt})\n"
+            f" └ 🤝 <b>To'lanmagan qarzlar:</b> <b>{debt_fmt}</b>\n\n"
+            f"👇 <i>Pastdagi tugmalar orqali ushbu foydalanuvchiga xabar yuborishingiz yoki ro'yxatga qaytishingiz mumkin:</i>"
+        )
+
+        buttons = []
+        if u.get("telegram_id"):
+            buttons.append([{"text": f"✉️ {u.get('full_name') or 'Fermer'}ga xabar yozish", "callback_data": f"reply_{u['telegram_id']}"}])
+        buttons.append([{"text": "◀️ Ro'yxatga qaytish", "callback_data": f"u_page_{return_page}"}])
+
+        return card, {"inline_keyboard": buttons}
+    finally:
+        conn.close()
+
+
+def export_database_json():
+    """Barcha jadvallarni JSON zaxira fayliga chiqarish"""
+    conn = get_db()
+    c = dict_cursor(conn)
+    backup_data = {}
+    tables = ["users", "prayer_users", "bulls", "weighings", "feed_logs", "feed_inventory", "other_expenses", "cash_transactions", "debts", "debt_payments", "vaccine_schedules", "advertisements"]
+    try:
+        for t in tables:
+            try:
+                c.execute(adapt_query(f"SELECT * FROM {t}"))
+                backup_data[t] = [dict(r) for r in c.fetchall()]
+            except Exception:
+                backup_data[t] = []
+        return backup_data
+    finally:
+        conn.close()
+
+
+def import_database_json(data):
+    """JSON zaxira faylidan ma'lumotlarni bazaga yuklash"""
+    conn = get_db()
+    c = conn.cursor()
+    imported_counts = {}
+    try:
+        for table, rows in data.items():
+            if not isinstance(rows, list) or not rows:
+                continue
+            cnt = 0
+            for r in rows:
+                cols = list(r.keys())
+                vals = [r[col] for col in cols]
+                placeholders = ", ".join(["?" for _ in cols])
+                cols_str = ", ".join(cols)
+                try:
+                    c.execute(adapt_query(f"""
+                        INSERT INTO {table} ({cols_str}) VALUES ({placeholders})
+                        ON CONFLICT DO NOTHING
+                    """ if IS_POSTGRES else f"""
+                        INSERT OR IGNORE INTO {table} ({cols_str}) VALUES ({placeholders})
+                    """), vals)
+                    cnt += 1
+                except Exception:
+                    pass
+            imported_counts[table] = cnt
+        conn.commit()
+        return imported_counts
+    finally:
+        conn.close()
 
 
 
@@ -1206,6 +1549,70 @@ def handle_telegram_update(update, bot_token=None):
                 reply_markup=cancel_kb,
                 bot_token=active_token
             )
+        if cb_data.startswith("closechat_"):
+            target_user = int(cb_data.replace("closechat_", ""))
+            USER_STATE.pop(target_user, None)
+            answer_callback_query(cb_id, "Muloqot yopildi!", bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, f"🚪 <i>Foydalanuvchi (ID: <code>{target_user}</code>) bilan muloqot yakunlandi.</i>", reply_markup=None, bot_token=active_token)
+            send_telegram_msg(
+                target_user,
+                "╭────────────────────────╮\n"
+                "   ✅  <b>MULOQOT YAKUNLANDI</b>\n"
+                "╰────────────────────────╯\n\n"
+                "Admin bilan savol-javob muloqoti yakunlandi.\n"
+                "Agar yana savollaringiz bo'lsa, istalgan payt «✍️ Adminga murojaat» tugmasi orqali yozishingiz mumkin!\n\n"
+                "Quyidagi menyudan kerakli bo'limni tanlashingiz mumkin:",
+                reply_markup=get_telegram_main_menu(False, is_prayer_bot),
+                bot_token=CHORVA_BOT_TOKEN
+            )
+            return
+
+        if cb_data.startswith("u_page_"):
+            page_num = int(cb_data.replace("u_page_", ""))
+            answer_callback_query(cb_id, bot_token=active_token)
+            text_out, kb_out = format_user_list_keyboard(page=page_num)
+            edit_telegram_msg(chat_id, msg_id, text_out, kb_out, bot_token=active_token)
+            return
+
+        if cb_data.startswith("u_view_"):
+            parts = cb_data.split("_")
+            u_id = int(parts[2])
+            ret_page = int(parts[3]) if len(parts) > 3 else 1
+            answer_callback_query(cb_id, bot_token=active_token)
+            text_out, kb_out = format_user_details(u_id, return_page=ret_page)
+            edit_telegram_msg(chat_id, msg_id, text_out, kb_out, bot_token=active_token)
+            return
+
+        if cb_data == "u_close":
+            answer_callback_query(cb_id, bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "👥 <i>Foydalanuvchilar ro'yxati yopildi.</i>", reply_markup=None, bot_token=active_token)
+            return
+
+        if cb_data.startswith("lenta_calc"):
+            target_an = cb_data.replace("lenta_calc_", "").replace("lenta_calc", "") or "cattle"
+            USER_STATE[user_id] = f"waiting_lenta_calc_{target_an}"
+            answer_callback_query(cb_id, bot_token=active_token)
+
+            if target_an == "sheep":
+                ex_txt = "95 82 (A: Ko'krak=95 sm, B: Uzunlik=82 sm)"
+                an_title = "🐑 Qo'y / Qo'chqor"
+            elif target_an == "horse":
+                ex_txt = "185 160 (A: Ko'krak=185 sm, B: Uzunlik=160 sm)"
+                an_title = "🐎 Ot / Yilqi"
+            else:
+                ex_txt = "180 155 (A: Ko'krak=180 sm, B: Uzunlik=155 sm)"
+                an_title = "🐂 Qoramol / Bo'rdoqi Buqa"
+
+            c_prompt = (
+                f"╭────────────────────────╮\n"
+                f"   🧮  <b>{an_title.upper()} VAZNINI HISOBLASH</b>\n"
+                f"╰────────────────────────╯\n\n"
+                f"O'lchangan ikkita sonni (A va B) yuboring:\n\n"
+                f"💡 <b>Namunaviy yuborish:</b> <code>{ex_txt}</code>\n\n"
+                f"<i>Bekor qilish uchun «❌ Bekor qilish» tugmasini bosing.</i>"
+            )
+            cancel_kb = {"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}
+            send_telegram_msg(chat_id, c_prompt, reply_markup=cancel_kb, bot_token=active_token)
             return
 
     # 2. Xabar (Message) kelganda
@@ -1260,6 +1667,90 @@ def handle_telegram_update(update, bot_token=None):
         f_size = doc.get("file_size") or 0
         file_id = doc.get("file_id")
 
+        is_in_db_restore = (ADMIN_STATE.get(chat_id) == "waiting_db_restore")
+        f_name_lower = f_name.lower()
+        is_db_backup = (
+            is_in_db_restore or
+            f_name_lower.endswith(".db") or
+            f_name_lower.endswith(".sqlite") or
+            f_name_lower.endswith(".sqlite3") or
+            (f_name_lower.endswith(".json") and ("backup" in f_name_lower or "chorva" in f_name_lower or is_in_db_restore))
+        )
+
+        # 1. Baza zaxira fayli kelganda (.db yoki .json)
+        if is_db_backup and is_admin:
+            ADMIN_STATE.pop(chat_id, None)
+            send_telegram_msg(chat_id, "⏳ <b>Baza fayli qabul qilinmoqda va tiklanmoqda...</b>", bot_token=active_token)
+            try:
+                r_fi = requests.get(f"https://api.telegram.org/bot{active_token}/getFile?file_id={file_id}", timeout=20)
+                tg_path = r_fi.json().get("result", {}).get("file_path")
+                if not tg_path:
+                    send_telegram_msg(chat_id, "❌ Telegramdan faylni yuklab bo'lmadi.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+                    return
+
+                down_url = f"https://api.telegram.org/file/bot{active_token}/{tg_path}"
+                r_down = requests.get(down_url, timeout=60)
+                file_bytes = r_down.content
+
+                if f_name_lower.endswith(".json"):
+                    json_data = json.loads(file_bytes.decode("utf-8"))
+                    imported = import_database_json(json_data)
+                    u_cnt = imported.get("users", 0)
+                    b_cnt = imported.get("bulls", 0)
+                    w_cnt = imported.get("weighings", 0)
+                    msg_succ = (
+                        "╭────────────────────────╮\n"
+                        "   ✅  <b>BAZA TIKLANDI (JSON)!</b>\n"
+                        "╰────────────────────────╯\n\n"
+                        f"📁 <b>Fayl:</b> <code>{f_name}</code>\n"
+                        f"👥 <b>Fermerlar:</b> <b>{u_cnt} ta</b>\n"
+                        f"🐂 <b>Jonivorlar:</b> <b>{b_cnt} ta</b>\n"
+                        f"⚖️ <b>O'lchovlar:</b> <b>{w_cnt} ta</b>\n\n"
+                        "🟢 Barcha ma'lumotlar muvaffaqiyatli tiklandi!"
+                    )
+                    send_telegram_msg(chat_id, msg_succ, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+                    return
+                else:
+                    if not IS_POSTGRES:
+                        import shutil
+                        tmp_test = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_restore.db")
+                        with open(tmp_test, "wb") as f_tmp:
+                            f_tmp.write(file_bytes)
+
+                        test_conn = sqlite3.connect(tmp_test)
+                        test_cur = test_conn.cursor()
+                        test_cur.execute("SELECT COUNT(*) FROM users")
+                        u_cnt = test_cur.fetchone()[0]
+                        test_cur.execute("SELECT COUNT(*) FROM bulls")
+                        b_cnt = test_cur.fetchone()[0]
+                        test_conn.close()
+
+                        shutil.copyfile(tmp_test, LOCAL_DB_FILE)
+                        try: os.remove(tmp_test)
+                        except Exception: pass
+
+                        init_cloud_database()
+
+                        msg_succ = (
+                            "╭────────────────────────╮\n"
+                            "   ✅  <b>BAZA TIKLANDI (SQLITE)!</b>\n"
+                            "╰────────────────────────╯\n\n"
+                            f"📁 <b>Fayl:</b> <code>{f_name}</code>\n"
+                            f"📦 <b>Hajmi:</b> <b>{round(len(file_bytes)/1024, 1)} KB</b>\n"
+                            f"👥 <b>Fermerlar:</b> <b>{u_cnt} ta</b>\n"
+                            f"🐂 <b>Jonivorlar:</b> <b>{b_cnt} ta</b>\n\n"
+                            "🟢 <b>Render serveridagi baza 100% tiklandi va faol!</b>"
+                        )
+                        send_telegram_msg(chat_id, msg_succ, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+                        return
+                    else:
+                        send_telegram_msg(chat_id, "⚠️ Server PostgreSQL rejimida. Iltimos, .json formatdagi zaxira faylini yuboring.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+                        return
+            except Exception as ex:
+                send_telegram_msg(chat_id, f"❌ <b>Bazani tiklashda xatolik:</b> {ex}", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+                return
+
+        # 2. Yangi APK ilova kelganda
         is_apk_target = (
             is_in_apk_state or
             f_name.lower().endswith(".apk") or
@@ -1395,8 +1886,11 @@ def handle_telegram_update(update, bot_token=None):
     if is_admin and reply_target_user:
         ans_text = text or msg.get("caption") or ""
         if not ans_text:
-            send_telegram_msg(chat_id, "Javob matni bo'sh bo'lishi mumkin emas.", reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+            send_telegram_msg(chat_id, "Javob matni bo'sh bo'lishi mumkin emas.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
             return
+
+        # Foydalanuvchini chat rejimida saqlab qolamiz (uzilib qolmasligi uchun!)
+        USER_STATE[reply_target_user] = "in_support_chat"
 
         user_notification = (
             "╭────────────────────────╮\n"
@@ -1404,68 +1898,162 @@ def handle_telegram_update(update, bot_token=None):
             "╰────────────────────────╯\n\n"
             f"{ans_text}\n\n"
             "────────────────────────\n"
-            "💬 <i>Yana savolingiz bo'lsa, «✍️ Adminga murojaat» tugmasi orqali yozishingiz mumkin.</i>"
+            "💬 <i>Muloqot faol. Qo'shimcha savolingiz yoki javobingiz bo'lsa, to'g'ridan-to'g'ri shu yerga yozishingiz mumkin.</i>\n\n"
+            "<i>(Muloqotni yakunlash uchun pastdagi «🚪 Muloqotni yakunlash» tugmasini bosing).</i>"
         )
-        send_telegram_msg(reply_target_user, user_notification, bot_token=CHORVA_BOT_TOKEN)
+        chat_user_kb = {
+            "keyboard": [[{"text": "🚪 Muloqotni yakunlash (Chiqish)"}]],
+            "resize_keyboard": True
+        }
+        send_telegram_msg(reply_target_user, user_notification, reply_markup=chat_user_kb, bot_token=CHORVA_BOT_TOKEN)
 
+        admin_card_kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "💬 Yana javob berish", "callback_data": f"reply_{reply_target_user}"},
+                    {"text": "🚪 Chatni yopish", "callback_data": f"closechat_{reply_target_user}"}
+                ]
+            ]
+        }
         send_telegram_msg(
             chat_id,
-            f"✅ <b>Javobingiz foydalanuvchiga (ID: <code>{reply_target_user}</code>) muvaffaqiyatli yetkazildi!</b>",
-            reply_markup=get_telegram_main_menu(True, is_prayer_bot),
+            f"✅ <b>Javobingiz foydalanuvchiga (ID: <code>{reply_target_user}</code>) muvaffaqiyatli yetkazildi!</b>\n"
+            "<i>Muloqot ochiq qoldi. Foydalanuvchi yana yozsa, xabari to'g'ridan-to'g'ri sizga keladi.</i>",
+            reply_markup=admin_card_kb,
             bot_token=active_token
         )
         return
 
-    # 0.2. Foydalanuvchi adminga murojaat/savol yozyaptimi?
-    if USER_STATE.get(user_id) == "waiting_support":
+    # 0.15. Foydalanuvchi torozisiz vazn hisoblashda sonlarni yubordimi?
+    if USER_STATE.get(user_id, "").startswith("waiting_lenta_calc"):
+        state_val = USER_STATE.get(user_id, "")
+        target_animal = state_val.replace("waiting_lenta_calc_", "").replace("waiting_lenta_calc", "").strip("_")
         USER_STATE.pop(user_id, None)
-        user_msg = text or msg.get("caption") or ""
-        if not user_msg:
-            send_telegram_msg(chat_id, "Murojaat matni bo'sh bo'lishi mumkin emas.", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+
+        if text in ("/cancel", "❌ Bekor qilish", "Bekor qilish", "/exit"):
+            send_telegram_msg(chat_id, "Amal bekor qilindi.", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
             return
 
-        u_phone = "Kiritilmagan"
-        conn = get_db()
-        c = dict_cursor(conn)
-        try:
-            c.execute(adapt_query("SELECT phone, full_name, farm_name FROM users WHERE telegram_id = ?"), (user_id,))
-            ur = c.fetchone()
-            if ur and ur.get("phone"):
-                u_phone = ur["phone"]
-        finally:
-            conn.close()
+        nums = [float(s) for s in re.findall(r'\d+(?:\.\d+)?', text)]
+        if len(nums) >= 2:
+            a, b = nums[0], nums[1]
+            t_lower = text.lower()
+            if "qo'y" in t_lower or "qoy" in t_lower or target_animal == "sheep" or (not target_animal and a <= 120 and b <= 110):
+                w = (a * a * b) / 10800
+                an_name = "Qo'y / Qo'chqor"
+                meat_kg = round(w * 0.50)
+                meat_pct = "50%"
+                active_key = "sheep"
+            elif "ot" in t_lower or target_animal == "horse":
+                w = (a * a * b) / 11877
+                an_name = "Ot / Yilqi"
+                meat_kg = round(w * 0.50)
+                meat_pct = "50%"
+                active_key = "horse"
+            else:
+                w = (a * b) / 50
+                an_name = "Qoramol / Bo'rdoqi Buqa"
+                meat_kg = round(w * 0.56)
+                meat_pct = "56%"
+                active_key = "cattle"
 
-        u_name = from_user.get("first_name", "Foydalanuvchi")
-        u_uname = f"@{from_user.get('username')}" if from_user.get("username") else "mavjud emas"
-        tashkent_now = get_now_tashkent().strftime("%H:%M | %d.%m.%Y")
+            w_round = round(w)
+            res_txt = (
+                "╭────────────────────────╮\n"
+                "   🎯  <b>HISOBLANGAN TIRIK VAZN</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"🐾 <b>Jonivor:</b> <b>{an_name}</b>\n"
+                f"📏 <b>Ko'krak aylanasi (A):</b> <b>{int(a)} sm</b>\n"
+                f"📏 <b>Tana uzunligi (B):</b> <b>{int(b)} sm</b>\n\n"
+                f"⚖️ <b>Tirik vazn (Taxminiy):</b> <b>{w_round} kg</b>\n"
+                f"📊 <b>Aniq oraliq:</b> {round(w*0.97)} – {round(w*1.03)} kg (±3% aniqlik)\n"
+                f"🥩 <b>Taxminiy sof go'sht chiqishi:</b> <b>~{meat_kg} kg</b>\n\n"
+                "<i>📱 Mobil ilovada barcha jonivorlarning vazn dinamikasini saqlab borishingiz mumkin!</i>"
+            )
+            calc_kb = {
+                "inline_keyboard": [
+                    [{"text": "🖼 Rasmli qo'llanmani ko'rish", "callback_data": f"lenta_{active_key}"}],
+                    [{"text": "🔄 Yana boshqa hisoblash", "callback_data": f"lenta_calc_{active_key}"}]
+                ]
+            }
+            send_telegram_msg(chat_id, res_txt, reply_markup=calc_kb, bot_token=active_token)
+            send_telegram_msg(chat_id, "Asosiy menyuga qaytildi:", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+            return
+        else:
+            send_telegram_msg(chat_id, "⚠️ Iltimos, ikkita son kiriting (masalan: <code>180 155</code> yoki <code>qo'y 95 82</code>).", bot_token=active_token)
+            return
 
-        admin_card = (
-            "╭────────────────────────╮\n"
-            "   📩  <b>YANGI MUROJAAT (AI CHORVA)</b>\n"
-            "╰────────────────────────╯\n\n"
-            f"👤 <b>Foydalanuvchi:</b> {u_name} ({u_uname})\n"
-            f"🆔 <b>Telegram ID:</b> <code>{user_id}</code>\n"
-            f"📞 <b>Telefon:</b> <code>{u_phone}</code>\n"
-            f"🕒 <b>Vaqt:</b> {tashkent_now}\n\n"
-            f"💬 <b>Savol / Murojaat:</b>\n"
-            f"«<i>{user_msg}</i>»"
-        )
-        reply_kb = {
-            "inline_keyboard": [
-                [{"text": "💬 Javob berish", "callback_data": f"reply_{user_id}"}]
-            ]
-        }
-        res = send_telegram_msg(ADMIN_ID, admin_card, reply_markup=reply_kb, bot_token=CHORVA_BOT_TOKEN)
-        if res and res.get("message_id"):
-            ADMIN_MSG_MAP[res["message_id"]] = user_id
+    # 0.2. Foydalanuvchi adminga murojaat/savol yozyaptimi? (Jonli muloqot rejimi)
+    if USER_STATE.get(user_id) in ("waiting_support", "in_support_chat"):
+        # Agar muloqotdan chiqmoqchi bo'lsa
+        if text in ("🚪 Muloqotni yakunlash (Chiqish)", "🚪 Muloqotni yakunlash", "🚪 Chiqish", "/exit", "❌ Bekor qilish", "/cancel"):
+            USER_STATE.pop(user_id, None)
+            send_telegram_msg(chat_id, "✅ <b>Admin bilan muloqot yakunlandi.</b> Asosiy menyuga qaytildi.", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+            return
 
-        client_confirm = (
-            "✅ <b>Murojaatingiz adminga muvaffaqiyatli yetkazildi!</b>\n\n"
-            "Admin tez orada savolingizni ko'rib chiqib, javob beradi. "
-            "Javob xabari to'g'ridan-to'g'ri shu botingizga yetib keladi."
-        )
-        send_telegram_msg(chat_id, client_confirm, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
-        return
+        # Agar foydalanuvchi menyudagi asosiy tugmalardan birini bosgan bo'lsa (muloqotdan avtomatik chiqadi)
+        if text.startswith("/") or text in ("🐂 AI Chorva haqida", "👤 Mening profilim", "📥 Ilovani yuklab olish (APK)", "❓ Qo'llanma va Yordam", "👑 ADMIN BOSHQARUV PANELI"):
+            USER_STATE.pop(user_id, None)
+            # pastdagi buyruqlarga o'tkaziladi
+        else:
+            user_msg = text or msg.get("caption") or ""
+            if not user_msg:
+                send_telegram_msg(chat_id, "Murojaat matni bo'sh bo'lishi mumkin emas.", reply_markup={"keyboard": [[{"text": "🚪 Muloqotni yakunlash (Chiqish)"}]], "resize_keyboard": True}, bot_token=active_token)
+                return
+
+            # Holatni saqlab qolamiz! (Muloqot davom etadi)
+            USER_STATE[user_id] = "in_support_chat"
+
+            u_phone = "Kiritilmagan"
+            conn = get_db()
+            c = dict_cursor(conn)
+            try:
+                c.execute(adapt_query("SELECT phone, full_name, farm_name FROM users WHERE telegram_id = ?"), (user_id,))
+                ur = c.fetchone()
+                if ur and ur.get("phone"):
+                    u_phone = ur["phone"]
+            finally:
+                conn.close()
+
+            u_name = from_user.get("first_name", "Foydalanuvchi")
+            u_uname = f"@{from_user.get('username')}" if from_user.get("username") else "mavjud emas"
+            tashkent_now = get_now_tashkent().strftime("%H:%M | %d.%m.%Y")
+
+            admin_card = (
+                "╭────────────────────────╮\n"
+                "   📩  <b>YANGI MUROJAAT (AI CHORVA)</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"👤 <b>Foydalanuvchi:</b> {u_name} ({u_uname})\n"
+                f"🆔 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+                f"📞 <b>Telefon:</b> <code>{u_phone}</code>\n"
+                f"🕒 <b>Vaqt:</b> {tashkent_now}\n\n"
+                f"💬 <b>Savol / Xabar:</b>\n"
+                f"«<i>{user_msg}</i>»"
+            )
+            reply_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "💬 Javob berish", "callback_data": f"reply_{user_id}"},
+                        {"text": "🚪 Chatni yopish", "callback_data": f"closechat_{user_id}"}
+                    ]
+                ]
+            }
+            res = send_telegram_msg(ADMIN_ID, admin_card, reply_markup=reply_kb, bot_token=CHORVA_BOT_TOKEN)
+            if res and res.get("message_id"):
+                ADMIN_MSG_MAP[res["message_id"]] = user_id
+
+            client_confirm = (
+                "✅ <b>Xabaringiz adminga yetkazildi!</b>\n\n"
+                "Admin javob berishi bilan xabari shu yerga keladi.\n"
+                "Muloqot faol — qo'shimcha savolingiz bo'lsa, yana yozavering.\n\n"
+                "<i>(Muloqotni yakunlash uchun pastdagi «🚪 Muloqotni yakunlash» tugmasini bosing).</i>"
+            )
+            chat_user_kb = {
+                "keyboard": [[{"text": "🚪 Muloqotni yakunlash (Chiqish)"}]],
+                "resize_keyboard": True
+            }
+            send_telegram_msg(chat_id, client_confirm, reply_markup=chat_user_kb, bot_token=active_token)
+            return
 
 
     # 1. Agar admin reklama/e'lon yuborayotgan bo'lsa
@@ -1798,10 +2386,12 @@ def handle_telegram_update(update, bot_token=None):
                 "╰────────────────────────╯\n\n"
                 f"Assalomu alaykum, <b>{from_user.get('first_name', 'Bosh Admin')}</b>!\n"
                 "Tizim boshqaruv paneliga xush kelibsiz.\n\n"
-                " • 📣 <b>Reklama / E'lon yuborish:</b> Botlar va ilovaga bir vaqtda xabar tarqatish\n"
-                " • 📊 <b>Baza statistikasi:</b> Foydalanuvchilar, fermerlar va jonivorlar soni\n"
+                " • 👥 <b>Foydalanuvchilar ro'yxati:</b> Fermerlar, chorvalari va sarmoyalari\n"
+                " • 💾 <b>Bazani yuklab olish:</b> Render o'chishidan oldin to'liq zaxira (.db / .json)\n"
+                " • 📥 <b>Bazani tiklash:</b> Qayta ishga tushganda bazani 1 soniyada tiklash\n"
+                " • 📊 <b>Baza statistikasi:</b> Tizim bo'yicha umumiy holat\n"
                 " • 📦 <b>Yangi APK yuklash:</b> Mobil ilovani yangilash\n"
-                " • 👥 <b>Foydalanuvchilar ro'yxati:</b> Ro'yxatdan o'tgan fermerlar\n"
+                " • 📣 <b>Reklama / E'lon yuborish:</b> Botlar va ilovaga bir vaqtda xabar tarqatish\n"
                 " • 🔔 <b>Azon eslatmasini sinash:</b> Bildirishnomani darhol test qilish\n"
                 " • 🔙 <b>Asosiy menyuga qaytish:</b> Oddiy foydalanuvchi ko'rinishiga o'tish"
             )
@@ -1817,21 +2407,76 @@ def handle_telegram_update(update, bot_token=None):
         send_telegram_msg(chat_id, "Asosiy menyuga qaytildi.", reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
         return
 
+    # 1. Foydalanuvchilar ro'yxati (Tugmali, Sahifalash va To'liq tahlil bilan)
     if is_admin and text in ("👥 Foydalanuvchilar ro'yxati", "👥 Foydalanuvchilar", "/users"):
-        conn = get_db()
-        c = dict_cursor(conn)
+        text_out, kb_out = format_user_list_keyboard(page=1)
+        send_telegram_msg(chat_id, text_out, reply_markup=kb_out, bot_token=active_token)
+        return
+
+    # 2. Bazani yuklab olish (Render qayta tushishidan oldin yoki istalgan payt)
+    if is_admin and text in ("💾 Bazani yuklab olish", "💾 Baza zaxirasi", "/backup", "/dump"):
+        send_telegram_msg(chat_id, "⏳ <b>Baza zaxirasi tayyorlanmoqda...</b>", bot_token=active_token)
+        now_str = get_now_tashkent().strftime("%Y%m%d_%H%M")
+        
+        # A) Agar SQLite bo'lsa, .db faylni to'g'ridan-to'g'ri jo'natish
+        if not IS_POSTGRES and os.path.exists(LOCAL_DB_FILE):
+            cap_db = (
+                "╭────────────────────────╮\n"
+                "   💾  <b>CHORVA BULUT BAZASI (SQLITE)</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"📅 <b>Sana:</b> {get_now_tashkent().strftime('%Y-%m-%d %H:%M')}\n"
+                f"📁 <b>Fayl:</b> <code>chorva_cloud_{now_str}.db</code>\n\n"
+                "💡 <b>Qayta tiklash yo'riqnomasi:</b>\n"
+                "Render qayta ishga tushganda yoki yangilanganda, ushbu faylni botga shunchaki qayta jo'nating. "
+                "Tizim bazani darhol to'liq tiklab oladi!"
+            )
+            import shutil
+            tmp_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"chorva_cloud_{now_str}.db")
+            try:
+                shutil.copyfile(LOCAL_DB_FILE, tmp_db)
+                send_telegram_document(chat_id, tmp_db, caption=cap_db, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            finally:
+                if os.path.exists(tmp_db):
+                    try: os.remove(tmp_db)
+                    except Exception: pass
+
+        # B) Universal JSON zaxirani ham jo'natish
         try:
-            c.execute(adapt_query("SELECT id, phone, full_name, farm_name, is_verified FROM users ORDER BY id DESC LIMIT 15"))
-            rows = c.fetchall()
-            if rows:
-                u_list = "📋 <b>Oxirgi ro'yxatdan o'tgan fermerlar:</b>\n\n"
-                for u in rows:
-                    u_list += f"▫️ <b>#{u['id']}</b> | <b>{u['full_name'] or 'Nomsiz'}</b>\n    📞 <code>{u['phone']}</code> | 🏡 {u['farm_name'] or 'Mavjud emas'}\n"
-            else:
-                u_list = "Hozircha ro'yxatdan o'tgan fermerlar mavjud emas."
-            send_telegram_msg(chat_id, u_list, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
-        finally:
-            conn.close()
+            dump_data = export_database_json()
+            json_filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"chorva_backup_{now_str}.json")
+            with open(json_filename, "w", encoding="utf-8") as f:
+                json.dump(dump_data, f, ensure_ascii=False, indent=2, default=str)
+
+            cap_json = (
+                "╭────────────────────────╮\n"
+                "   📋  <b>UNIVERSAL JSON ZAXIRA</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"📅 <b>Sana:</b> {get_now_tashkent().strftime('%Y-%m-%d %H:%M')}\n"
+                f"📁 <b>Fayl:</b> <code>chorva_backup_{now_str}.json</code>\n\n"
+                "Bu barcha jadvallarning universal matnli zaxira nusxasi. Uni botga jo'natib ham bazani tiklash mumkin."
+            )
+            send_telegram_document(chat_id, json_filename, caption=cap_json, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            if os.path.exists(json_filename):
+                try: os.remove(json_filename)
+                except Exception: pass
+        except Exception as e:
+            send_telegram_msg(chat_id, f"⚠️ JSON zaxira yaratishda xatolik: {e}", bot_token=active_token)
+        return
+
+    # 3. Bazani tiklash rejimi
+    if is_admin and text in ("📥 Bazani tiklash", "📥 Tiklash", "/restore"):
+        ADMIN_STATE[chat_id] = "waiting_db_restore"
+        prompt_rst = (
+            "╭────────────────────────╮\n"
+            "   📥  <b>BAZANI TIKLASH REJIMI</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Avval yuklab olgan <code>.db</code> yoki <code>.json</code> zaxira faylingizni menga yuboring (fayl sifatida).\n\n"
+            "⚡️ <b>Nima sodir bo'ladi?</b>\n"
+            " • Baza ushbu fayl asosida to'liq yangilanadi;\n"
+            " • Barcha fermerlar, jonivorlar, kassa va hisobotlar qayta tiklanadi!\n\n"
+            "<i>Bekor qilish uchun: «❌ Bekor qilish» tugmasini bosing.</i>"
+        )
+        send_telegram_msg(chat_id, prompt_rst, reply_markup={"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}, bot_token=active_token)
         return
 
     if is_admin and text in ("🔔 Azon eslatmasini sinash", "/testnotif", "/test_azon"):
@@ -2031,17 +2676,19 @@ def handle_telegram_update(update, bot_token=None):
         return
 
     if text in ("✍️ Adminga murojaat", "✍️ Murojaat", "/murojaat", "/support"):
-        USER_STATE[user_id] = "waiting_support"
+        USER_STATE[user_id] = "in_support_chat"
         prompt = (
             "╭────────────────────────╮\n"
-            "   ✍️  <b>ADMINGA MUROJAAT</b>\n"
+            "   ✍️  <b>ADMINGA MUROJAAT (JONLI CHAT)</b>\n"
             "╰────────────────────────╯\n\n"
-            "AI Chorva bo'yicha savolingiz, taklifingiz yoki tushunmagan joyingiz bo'lsa, "
-            "batafsil yozib yuboring.\n\n"
-            "📩 Xabaringiz to'g'ridan-to'g'ri adminga boradi va admin javob berishi bilan javob shu yerga keladi!\n\n"
-            "<i>Bekor qilish uchun: «❌ Bekor qilish» tugmasini bosing.</i>"
+            "AI Chorva bo'yicha savolingiz, taklifingiz yoki murojaatingizni batafsil yozib yuboring.\n\n"
+            "📩 <b>Xabaringiz to'g'ridan-to'g'ri adminga boradi.</b>\n"
+            "Admin javob berishi bilan xabari shu yerga keladi va siz xuddi oddiy chatdagidek to'g'ridan-to'g'ri yozisha olasiz!\n\n"
+            "<i>Muloqotni yakunlash uchun istalgan payt pastdagi «🚪 Muloqotni yakunlash (Chiqish)» tugmasini bosing.</i>"
         )
-        send_telegram_msg(chat_id, prompt, reply_markup={"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}, bot_token=active_token)
+        send_telegram_msg(chat_id, prompt, reply_markup={"keyboard": [[{"text": "🚪 Muloqotni yakunlash (Chiqish)"}]], "resize_keyboard": True}, bot_token=active_token)
+    if text in ("📏 Torozisiz vazn o'lchash", "/lenta", "/vazn", "/weight"):
+        send_lenta_guide(chat_id, animal="menu", bot_token=active_token)
         return
 
 
@@ -2408,6 +3055,16 @@ def download_latest_apk():
     if os.path.exists(local_path):
         return send_file(local_path, as_attachment=True, download_name="ChorvaERP.apk", mimetype="application/vnd.android.package-archive")
     return redirect("https://github.com/fazliddin3388/aichorva-cloud/releases", code=302)
+
+
+@app.route('/img/<path:filename>', methods=['GET'])
+def serve_cloud_image(filename):
+    """Lenta va tarozi diagrammalari hamda ilova rasmlarini uzatish"""
+    img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+    target = os.path.join(img_dir, filename)
+    if os.path.exists(target):
+        return send_file(target, mimetype="image/jpeg")
+    return jsonify({"error": "Image not found"}), 404
 
 
 @app.route('/api/app/latest', methods=['GET'])
