@@ -4110,6 +4110,29 @@ def cloud_sync():
         conn.close()
 
 
+@app.route('/api/cloud/reset-my-data', methods=['POST'])
+@jwt_required
+def reset_my_cloud_data():
+    """Foydalanuvchining shaxsiy bulutli ma'lumotlarini (buqalar, xarajatlar va b.) tozalash"""
+    user_id = request.current_user["user_id"]
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        tables = [
+            "weighings", "feed_logs", "other_expenses", "cash_transactions",
+            "debts", "vaccine_schedules", "feed_inventory", "bulls"
+        ]
+        for tbl in tables:
+            c.execute(adapt_query(f"DELETE FROM {tbl} WHERE user_id = ?"), (user_id,))
+        conn.commit()
+        return jsonify({"status": "success", "message": "Hisobingiz ma'lumotlari bulutdan muvaffaqiyatli tozalandi!"})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"status": "error", "message": f"Tozalashda xatolik: {str(e)}"}), 500
+    finally:
+        conn.close()
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 7. BILDIRISHNOMALAR (FCM PUSH) VA REKLAMA/E'LONLAR TIZIMI
 # ═════════════════════════════════════════════════════════════════════════════
