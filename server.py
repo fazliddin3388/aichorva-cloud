@@ -562,7 +562,7 @@ def init_cloud_database():
                 file_id TEXT NOT NULL,
                 file_name VARCHAR(256),
                 file_size BIGINT,
-                version_name VARCHAR(64) DEFAULT 'v1.7',
+                version_name VARCHAR(64) DEFAULT 'v1.8',
                 changelog TEXT,
                 uploaded_by BIGINT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -573,7 +573,7 @@ def init_cloud_database():
                 file_id TEXT NOT NULL,
                 file_name TEXT,
                 file_size INTEGER,
-                version_name TEXT DEFAULT 'v1.7',
+                version_name TEXT DEFAULT 'v1.8',
                 changelog TEXT,
                 uploaded_by INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -632,6 +632,13 @@ def run_cloud_schema_migrations(conn):
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
         except Exception:
             pass
+
+    # Eski 'v1.7' yozuvlarini yangi 'v1.8' ga xavfsiz yangilash
+    try:
+        cursor.execute("UPDATE app_releases SET version_name = 'v1.8' WHERE version_name = 'v1.7' OR version_name = '1.7'")
+    except Exception:
+        pass
+
     try:
         conn.commit()
     except Exception:
@@ -920,6 +927,76 @@ def send_telegram_msg(chat_id, text, reply_markup=None, bot_token=None):
     return None
 
 
+def inspect_apk_metadata(source):
+    """
+    APK faylidan (fayl yo'li, baytlar yoki file-like obyektdan) haqiqiy versiya (version_name),
+    versiya kodi (version_code) va fayl hajmini (size_mb) avtomatik aniqlash.
+    """
+    meta = {"version_name": None, "version_code": None, "size_mb": None}
+    if not source:
+        return meta
+    try:
+        import zipfile
+        import io
+        zf = None
+        if isinstance(source, (str, bytes, bytearray)):
+            if isinstance(source, str):
+                if os.path.exists(source):
+                    meta["size_mb"] = round(os.path.getsize(source) / (1024 * 1024), 2)
+                    zf = zipfile.ZipFile(source, 'r')
+            else:
+                meta["size_mb"] = round(len(source) / (1024 * 1024), 2)
+                zf = zipfile.ZipFile(io.BytesIO(source), 'r')
+        elif hasattr(source, 'read'):
+            zf = zipfile.ZipFile(source, 'r')
+
+        if zf:
+            with zf:
+                # 1. assets/public/app.js ichidagi APP_VERSION va APP_VERSION_CODE
+                for name in zf.namelist():
+                    if name.endswith("app.js") or "app.bundle" in name:
+                        try:
+                            content = zf.read(name).decode("utf-8", errors="ignore")
+                            m_v = re.search(r"APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", content)
+                            if m_v:
+                                meta["version_name"] = m_v.group(1).replace("v", "").strip()
+                            m_c = re.search(r"APP_VERSION_CODE\s*=\s*(\d+)", content)
+                            if m_c:
+                                meta["version_code"] = int(m_c.group(1))
+                            if meta["version_name"]:
+                                break
+                        except Exception:
+                            pass
+
+                # 2. Agar js dan topilmasa, AndroidManifest.xml string poolidan tahlil
+                if not meta["version_name"] and "AndroidManifest.xml" in zf.namelist():
+                    try:
+                        import struct
+                        axml_data = zf.read("AndroidManifest.xml")
+                        str_count = struct.unpack('<I', axml_data[16:20])[0]
+                        flags = struct.unpack('<I', axml_data[24:28])[0]
+                        strings_start = struct.unpack('<I', axml_data[28:32])[0]
+                        is_utf8 = bool(flags & (1 << 8))
+                        offsets = [struct.unpack('<I', axml_data[36 + i*4:40 + i*4])[0] for i in range(min(str_count, 120))]
+                        base = 8 + strings_start
+                        for off in offsets:
+                            pos = base + off
+                            if is_utf8:
+                                u8len = axml_data[pos+1]
+                                s = axml_data[pos+2:pos+2+u8len].decode('utf-8', errors='ignore')
+                            else:
+                                u16len = struct.unpack('<H', axml_data[pos:pos+2])[0]
+                                s = axml_data[pos+2:pos+2+u16len*2].decode('utf-16le', errors='ignore')
+                            if re.match(r'^\d+\.\d+(\.\d+)?$', s):
+                                meta["version_name"] = s.strip()
+                                break
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[APK METADATA INSPECT ERR]: {e}")
+    return meta
+
+
 def cache_apk_locally(file_id, bot_token=None):
     """Admin yuborgan APK faylni Telegramdan yuklab olib, server diskida ChorvaERP.apk nomi bilan saqlash"""
     tok = bot_token or CHORVA_BOT_TOKEN
@@ -939,6 +1016,24 @@ def cache_apk_locally(file_id, bot_token=None):
                             if chunk:
                                 f.write(chunk)
                     print(f"[APK DISK SAVE OK]: Server diskiga saqlandi -> {local_path} ({os.path.getsize(local_path)} bayt)")
+
+                    # APK ichidagi versiya va kodni avtomatik aniqlab version.json ga yozish
+                    try:
+                        meta = inspect_apk_metadata(local_path)
+                        if meta.get("version_name"):
+                            v_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+                            v_obj = {
+                                "versionName": meta["version_name"],
+                                "versionCode": meta.get("version_code") or 224,
+                                "sizeMb": str(meta.get("size_mb") or 5.37),
+                                "lastBuild": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "changelog": "Rasmiy yangilangan APK ilovasi"
+                            }
+                            with open(v_file, "w", encoding="utf-8") as vf:
+                                json.dump(v_obj, vf, indent=2)
+                    except Exception as ex_m:
+                        print(f"[APK AUTO UPDATE JSON ERR]: {ex_m}")
+
                     return local_path
     except Exception as e:
         print(f"[APK DISK SAVE ERR]: {e}")
@@ -1083,16 +1178,16 @@ def get_current_app_version_info():
     v_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
     v_info = {
         "version_name": "1.8",
-        "version_code": 221,
-        "changelog": "Ilovaga kirish soddalashtirildi, avtomatik yangilanish tizimi va o'lchov qo'llanmalari qo'shildi",
-        "apk_size_mb": 5.5,
+        "version_code": 224,
+        "changelog": "Ilova ichidan avtomatik yangilash va o'rnatish tizimi",
+        "apk_size_mb": 5.37,
         "release_date": datetime.now().strftime("%Y-%m-%d")
     }
     if os.path.exists(v_file):
         try:
             with open(v_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                v_info["version_name"] = str(data.get("versionName", v_info["version_name"]))
+                v_info["version_name"] = str(data.get("versionName", v_info["version_name"])).replace("v", "").strip()
                 v_info["version_code"] = int(data.get("versionCode", v_info["version_code"]))
                 v_info["changelog"] = str(data.get("changelog", v_info["changelog"]))
                 if "sizeMb" in data:
@@ -1102,6 +1197,25 @@ def get_current_app_version_info():
         except Exception:
             pass
 
+    # Mahalliy ChorvaERP.apk faylini to'liq tahlil qilish (eng ishonchli manba)
+    apk_candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ChorvaERP.apk")
+    ]
+    for ap in apk_candidates:
+        if os.path.exists(ap):
+            try:
+                meta = inspect_apk_metadata(ap)
+                if meta.get("size_mb"):
+                    v_info["apk_size_mb"] = meta["size_mb"]
+                if meta.get("version_name"):
+                    v_info["version_name"] = meta["version_name"]
+                if meta.get("version_code"):
+                    v_info["version_code"] = meta["version_code"]
+                break
+            except Exception as e:
+                print(f"[INSPECT LOCAL APK ERR]: {e}")
+
     try:
         conn = get_db()
         c = dict_cursor(conn)
@@ -1109,14 +1223,20 @@ def get_current_app_version_info():
         row = c.fetchone()
         conn.close()
         if row:
-            if row.get("version_name"):
-                v_info["version_name"] = str(row["version_name"]).replace("v", "").strip()
-            if row.get("changelog"):
-                v_info["changelog"] = str(row["changelog"])
-            if row.get("file_size"):
-                v_info["apk_size_mb"] = round(row["file_size"] / (1024 * 1024), 2)
-            if row.get("created_at"):
-                v_info["release_date"] = str(row["created_at"])[:10]
+            db_v_str = str(row.get("version_name") or "").replace("v", "").strip()
+            def parse_ver(v_s):
+                return [int(x) for x in re.findall(r'\d+', str(v_s))] if v_s else [0]
+
+            # Faqat bazadagi versiya version.json dan yuqori bo'lsa yangilaymiz (eski v1.7 qaytib qolmasligi uchun)
+            if parse_ver(db_v_str) > parse_ver(v_info["version_name"]):
+                v_info["version_name"] = db_v_str
+                if row.get("changelog"):
+                    v_info["changelog"] = str(row["changelog"])
+                if row.get("file_size"):
+                    v_info["apk_size_mb"] = round(row["file_size"] / (1024 * 1024), 2)
+                if row.get("created_at"):
+                    v_info["release_date"] = str(row["created_at"])[:10]
+
             v_info["file_id"] = row.get("file_id")
     except Exception:
         pass
@@ -1189,24 +1309,34 @@ def broadcast_version_update_to_users(version_name=None, changelog=None, size_mb
     }
 
     sent = 0
-    for tid in recipients:
-        try:
-            send_telegram_msg(tid, text_msg, reply_markup=inline_kb, bot_token=tok)
-            sent += 1
-            time.sleep(0.04)
-        except Exception:
-            pass
+    recipients_list = list(recipients)
+    # 🌊 To'lqinli (Wave / Queue) tarqatish:
+    # Serverga birdaniga katta yuklama tushmasligi va Telegram flood cheklovlariga uchramaslik uchun
+    # 15 tadan foydalanuvchiga 20 soniya oraliq bilan navbatma-navbat tarqatiladi
+    BATCH_SIZE = 15
+    for i in range(0, len(recipients_list), BATCH_SIZE):
+        batch = recipients_list[i:i + BATCH_SIZE]
+        for tid in batch:
+            try:
+                send_telegram_msg(tid, text_msg, reply_markup=inline_kb, bot_token=tok)
+                sent += 1
+                time.sleep(0.05)
+            except Exception:
+                pass
+        if i + BATCH_SIZE < len(recipients_list):
+            print(f"[BROADCAST BATCH]: {sent}/{len(recipients_list)} yuborildi. Keyingi to'lqin uchun 20s kutilmoqda...")
+            time.sleep(20)
 
-    print(f"[BROADCAST VERSION COMPLETE]: {sent}/{len(recipients)} foydalanuvchiga yuborildi.")
+    print(f"[BROADCAST VERSION COMPLETE]: {sent}/{len(recipients_list)} foydalanuvchiga yuborildi.")
     return sent
 
 
 def send_latest_apk_document(chat_id, active_token=None):
     """Foydalanuvchiga eng so'nggi APK faylini jo'natish"""
     v_info = get_current_app_version_info()
-    f_size = v_info.get("apk_size_mb", 5.5)
+    f_size = v_info.get("apk_size_mb", 5.37)
     v_name = v_info.get("version_name", "1.8")
-    ch_log = v_info.get("changelog", "")
+    ch_log = v_info.get("changelog", "Yangi rasmiy APK ilovasi")
 
     cap = (
         "╭────────────────────────╮\n"
@@ -1217,33 +1347,35 @@ def send_latest_apk_document(chat_id, active_token=None):
         f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
     )
     if ch_log:
-        cap += f"📝 <b>Yangiliklar:</b>\n<i>{ch_log}</i>\n"
+        cap += f"📝 <b>Izoh / Yangiliklar:</b>\n<i>{ch_log}</i>\n"
     cap += (
         "\n────────────────────────\n"
         "💡 <b>O'rnatish yo'riqnomasi:</b>\n"
-        "1️⃣ Faylni yuklab oling va ustiga bosib telefoningizga o'rnating;\n"
-        "2️⃣ Ma'lumotlaringiz (jonivorlar, o'lchovlar) to'liq saqlanib qoladi!"
+        "1️⃣ Yuqoridagi fayl ustiga bosib, telefoningizga o'rnating;\n"
+        "2️⃣ Ilovani ochgach, ushbu botdagi <b>«📱 Telefon raqamni ulashish»</b> yoki <b>«🔑 Ilovaga kirish kodi»</b> tugmasi orqali olingan kod bilan tizimga kiring!"
     )
 
-    # 1. Telegram file_id orqali
-    if v_info.get("file_id"):
-        res = send_telegram_document(chat_id, v_info["file_id"], caption=cap, bot_token=active_token)
-        if res:
-            return True
+    main_menu = get_telegram_main_menu(is_admin_user(chat_id), is_prayer_bot=(active_token == PRAYER_BOT_TOKEN))
 
-    # 2. Serverdagi mahalliy ChorvaERP.apk
+    # 1. Avval server diskidagi mahalliy ChorvaERP.apk ni tekshiramiz (eng ishonchli va yangi versiya)
     local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
     if os.path.exists(local_path):
-        res2 = send_telegram_document(chat_id, local_path, caption=cap, bot_token=active_token)
+        res2 = send_telegram_document(chat_id, local_path, caption=cap, reply_markup=main_menu, bot_token=active_token)
         if res2:
             return True
 
-    # 3. Fallback havola
+    # 2. Agar diskda bo'lmasa, Telegram file_id orqali uzatamiz
+    if v_info.get("file_id"):
+        res = send_telegram_document(chat_id, v_info["file_id"], caption=cap, reply_markup=main_menu, bot_token=active_token)
+        if res:
+            return True
+
+    # 3. Fallback to'g'ridan-to'g'ri havola
     fallback_text = (
         cap + "\n\n🌐 <b>Yuklab olish havolasi:</b>\n"
         "👉 https://aichorva-cloud.onrender.com/download/ChorvaERP.apk"
     )
-    send_telegram_msg(chat_id, fallback_text, bot_token=active_token)
+    send_telegram_msg(chat_id, fallback_text, reply_markup=main_menu, bot_token=active_token)
     return True
 
 
@@ -2019,10 +2151,6 @@ def handle_telegram_update(update, bot_token=None):
             if not version_match:
                 version_match = re.search(r'v?\d+(\.\d+)+', f_name, re.IGNORECASE)
 
-            version_name = version_match.group(0) if version_match else "v1.7"
-            changelog = cap or f"Yangi rasmiy APK ilovasi ({f_name})"
-            size_mb = round(f_size / (1024 * 1024), 2) if f_size else 0.0
-
             if not file_id:
                 send_telegram_msg(
                     chat_id,
@@ -2031,6 +2159,22 @@ def handle_telegram_update(update, bot_token=None):
                     bot_token=active_token
                 )
                 return
+
+            # Server diskiga saqlash va APK ichidagi haqiqiy versiyani avtomatik aniqlash
+            saved_local = cache_apk_locally(file_id, active_token)
+            apk_meta = inspect_apk_metadata(saved_local) if saved_local else None
+
+            if version_match:
+                version_name = version_match.group(0)
+            elif apk_meta and apk_meta.get("version_name"):
+                version_name = f"v{apk_meta['version_name']}"
+            else:
+                curr_v_info = get_current_app_version_info()
+                version_name = f"v{curr_v_info.get('version_name', '1.8')}"
+
+            v_code = (apk_meta.get("version_code") if apk_meta else None) or 224
+            size_mb = (apk_meta.get("size_mb") if apk_meta else None) or (round(f_size / (1024 * 1024), 2) if f_size else 5.37)
+            changelog = cap or f"Yangi rasmiy APK ilovasi ({version_name})"
 
             conn = get_db()
             c = conn.cursor()
@@ -2042,7 +2186,8 @@ def handle_telegram_update(update, bot_token=None):
                             file_id TEXT NOT NULL,
                             file_name TEXT,
                             file_size INTEGER,
-                            version_name TEXT DEFAULT 'v1.7',
+                            version_name TEXT DEFAULT 'v1.8',
+                            version_code INTEGER DEFAULT 224,
                             changelog TEXT,
                             uploaded_by INTEGER,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -2055,29 +2200,24 @@ def handle_telegram_update(update, bot_token=None):
                             file_id TEXT NOT NULL,
                             file_name VARCHAR(256),
                             file_size BIGINT,
-                            version_name VARCHAR(64) DEFAULT 'v1.7',
+                            version_name VARCHAR(64) DEFAULT 'v1.8',
+                            version_code INTEGER DEFAULT 224,
                             changelog TEXT,
                             uploaded_by BIGINT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
                 c.execute(adapt_query("""
-                    INSERT INTO app_releases (file_id, file_name, file_size, version_name, changelog, uploaded_by)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """), (file_id, f_name, f_size, version_name, changelog, user_id))
+                    INSERT INTO app_releases (file_id, file_name, file_size, version_name, version_code, changelog, uploaded_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """), (file_id, f_name, f_size, version_name, v_code, changelog, user_id))
                 conn.commit()
-                print(f"[APK SUCCESS]: Saved new APK {f_name} ({size_mb} MB) version={version_name} file_id={file_id}")
+                print(f"[APK SUCCESS]: Saved new APK {f_name} ({size_mb} MB) version={version_name} code={v_code} file_id={file_id}")
             except Exception as e:
                 print(f"[APK SAVE ERR]: {e}")
                 traceback.print_exc()
             finally:
                 conn.close()
-
-            # Server diskida ham ChorvaERP.apk sifatida saqlab qo'yish (fon rejimida)
-            try:
-                threading.Thread(target=cache_apk_locally, args=(file_id, active_token), daemon=True).start()
-            except Exception:
-                pass
 
             # Barcha foydalanuvchilarga yangi versiya haqida avtomatik bildirishnoma tarqatish
             try:
@@ -2822,60 +2962,8 @@ def handle_telegram_update(update, bot_token=None):
 
 
     if text in ("📥 Ilovani yuklab olish (APK)", "📥 Ilovani yuklab olish", "/apk", "/app"):
-        conn = get_db()
-        c = dict_cursor(conn)
-        latest_apk = None
-        try:
-            c.execute(adapt_query("SELECT file_id, file_name, file_size, version_name, changelog FROM app_releases ORDER BY id DESC LIMIT 1"))
-            latest_apk = c.fetchone()
-        finally:
-            conn.close()
-
-        if latest_apk and latest_apk.get("file_id"):
-            file_id = latest_apk["file_id"]
-            f_name = latest_apk.get("file_name") or "ChorvaERP.apk"
-            f_size = round((latest_apk.get("file_size") or 0) / (1024 * 1024), 2)
-            v_name = latest_apk.get("version_name") or "v1.7"
-            ch_log = latest_apk.get("changelog") or ""
-
-            cap = (
-                "╭────────────────────────╮\n"
-                "   📲  <b>AI CHORVA RASMIY APK</b>\n"
-                "╰────────────────────────╯\n\n"
-                f"📁 <b>Fayl:</b> <code>{f_name}</code>\n"
-                f"🏷 <b>Versiya:</b> <b>{v_name}</b>\n"
-                f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
-            )
-            if ch_log and ch_log != v_name:
-                cap += f"📝 <b>Izoh / Yangiliklar:</b>\n<i>{ch_log}</i>\n"
-            cap += (
-                "\n────────────────────────\n"
-                "💡 <b>O'rnatish yo'riqnomasi:</b>\n"
-                "1️⃣ Yuqoridagi fayl ustiga bosib, telefoningizga o'rnating;\n"
-                "2️⃣ Ilovani ochgach, ushbu botdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasi orqali olingan kod bilan tizimga kiring!"
-            )
-            res = send_telegram_document(chat_id, file_id, caption=cap, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
-            if res:
-                return
-
-        # 2. Agar Telegram file_id bilan yuborish o'tmasa, server diskidagi mahalliy ChorvaERP.apk ni tekshiramiz
-        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
-        if os.path.exists(local_path):
-            f_size = round(os.path.getsize(local_path) / (1024 * 1024), 2)
-            cap = (
-                "╭────────────────────────╮\n"
-                "   📲  <b>AI CHORVA RASMIY APK</b>\n"
-                "╰────────────────────────╯\n\n"
-                "📁 <b>Fayl:</b> <code>ChorvaERP.apk</code>\n"
-                f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
-                "🏷 <b>Versiya:</b> <b>Rasmiy Barqaror</b>\n\n"
-                "💡 <b>O'rnatish yo'riqnomasi:</b>\n"
-                "1️⃣ Yuqoridagi fayl ustiga bosib, telefoningizga o'rnating;\n"
-                "2️⃣ Ilovani ochgach, ushbu botdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasi orqali olingan kod bilan tizimga kiring!"
-            )
-            res2 = send_telegram_document(chat_id, local_path, caption=cap, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
-            if res2:
-                return
+        send_latest_apk_document(chat_id, active_token)
+        return
 
         # 3. Agar hali bazada ham, diskda ham bo'lmasa: Yo'riqnoma va to'g'ridan-to'g'ri havola
         fallback_text = (
@@ -3458,31 +3546,48 @@ def health_check():
     }), 200
 
 
+TELEGRAM_APK_CDN_CACHE = {"url": None, "expires_at": 0}
+
 @app.route('/download/ChorvaERP.apk', methods=['GET'])
 @app.route('/download/apk', methods=['GET'])
 @app.route('/api/app/download', methods=['GET'])
 def download_latest_apk():
-    """Mobil ilovani to'g'ridan-to'g'ri brauzer orqali yuklab olish"""
-    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
-    if os.path.exists(local_path):
-        return send_file(local_path, as_attachment=True, download_name="ChorvaERP.apk", mimetype="application/vnd.android.package-archive")
+    """
+    Mobil ilovani yuqori tezlikda va serverni ortiqcha yuklamasdan yuklab olish.
+    Render bepul tarifida 512MB RAM bo'lgani sababli, bir vaqtda ko'plab foydalanuvchilar yuklaganda
+    server qotib qolmasligi uchun Telegramning yuqori tezlikdagi global CDN tarmog'iga
+    (302 Redirect orqali) xavfsiz yo'naltiriladi!
+    """
+    global TELEGRAM_APK_CDN_CACHE
+    now = time.time()
 
-    # Agar mahalliy diskda bo'lmasa, eng so'nggi Telegram file_id dan uzatish
+    # 1. Telegram CDN keshini tekshiramiz (kesh 1 soat amal qiladi)
+    if TELEGRAM_APK_CDN_CACHE.get("url") and TELEGRAM_APK_CDN_CACHE.get("expires_at", 0) > now:
+        return redirect(TELEGRAM_APK_CDN_CACHE["url"], code=302)
+
+    # 2. Bazadan eng so'nggi Telegram file_id ni olib, Telegram CDN ga yo'naltirish
     try:
         conn = get_db()
         c = dict_cursor(conn)
-        c.execute(adapt_query("SELECT file_id FROM app_releases ORDER BY id DESC LIMIT 1"))
+        c.execute(adapt_query("SELECT file_id FROM app_releases WHERE file_id IS NOT NULL ORDER BY id DESC LIMIT 1"))
         row = c.fetchone()
         conn.close()
         if row and row.get("file_id") and CHORVA_BOT_TOKEN:
             file_id = row["file_id"]
-            r = requests.get(f"https://api.telegram.org/bot{CHORVA_BOT_TOKEN}/getFile?file_id={file_id}", timeout=15)
+            r = requests.get(f"https://api.telegram.org/bot{CHORVA_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10)
             if r.status_code == 200:
                 fpath = r.json().get("result", {}).get("file_path")
                 if fpath:
-                    return redirect(f"https://api.telegram.org/file/bot{CHORVA_BOT_TOKEN}/{fpath}", code=302)
+                    cdn_url = f"https://api.telegram.org/file/bot{CHORVA_BOT_TOKEN}/{fpath}"
+                    TELEGRAM_APK_CDN_CACHE = {"url": cdn_url, "expires_at": now + 3600}
+                    return redirect(cdn_url, code=302)
     except Exception as e:
-        print(f"[APK STREAM ERR]: {e}")
+        print(f"[APK CDN STREAM ERR]: {e}")
+
+    # 3. Agar Telegram CDN mavjud bo'lmasa, mahalliy server diskidan uzatamiz
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+    if os.path.exists(local_path):
+        return send_file(local_path, as_attachment=True, download_name="ChorvaERP.apk", mimetype="application/vnd.android.package-archive")
 
     return redirect("https://github.com/fazliddin3388/aichorva-cloud/releases", code=302)
 
@@ -3509,17 +3614,19 @@ def get_latest_app_release():
     local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
     has_local = os.path.exists(local_path)
 
-    return jsonify({
+    resp = jsonify({
         "status": "success",
         "version_name": v_info.get("version_name", "1.8"),
-        "version_code": v_info.get("version_code", 221),
+        "version_code": v_info.get("version_code", 224),
         "changelog": v_info.get("changelog", "Yangi imkoniyatlar va yaxshilanishlar"),
-        "apk_size_mb": v_info.get("apk_size_mb", 5.5),
+        "apk_size_mb": v_info.get("apk_size_mb", 5.37),
         "release_date": v_info.get("release_date", "2026-09-28"),
         "has_local_apk": has_local,
         "download_url": "/download/ChorvaERP.apk",
         "direct_download_url": "https://aichorva-cloud.onrender.com/download/ChorvaERP.apk"
     })
+    resp.headers["Cache-Control"] = "public, max-age=180"
+    return resp
 
 
 @app.route('/api/prayer/regions', methods=['GET'])
