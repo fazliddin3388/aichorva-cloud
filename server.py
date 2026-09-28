@@ -5,7 +5,7 @@ CHORVA ERP CLOUD — Ko'p Foydalanuvchili Bulutli Backend & API
 Xususiyatlari:
 1. Render.com va bulutli serverlar uchun to'liq moslashtirilgan.
 2. PostgreSQL (Render / Neon / Supabase) va SQLite qo'llab-quvvatlaydi.
-3. 100% BEPUL Telegram Bot orqali telefon raqamni tasdiqlash (0 so'm SMS xarajat).
+3. Telegram Bot orqali telefon raqamni xavfsiz tasdiqlash (Tezkor va qulay).
 4. Ko'p foydalanuvchili (Multi-tenant): har bir fermer faqat o'z ma'lumotlarini ko'radi.
 5. JWT tokenli xavfsiz autentifikatsiya.
 6. Mobil ilova uchun to'liq ikki tomonlama Cloud Sync API.
@@ -1667,7 +1667,7 @@ def handle_telegram_update(update, bot_token=None):
                     "╚════════════════════════════╝\n\n"
                     f"👋 <b>Assalomu alaykum, {from_user.get('first_name', 'Hurmatli foydalanuvchi')}!</b>\n\n"
                     "<b>AI Chorva</b> — chorvachilik va fermerlik tizimining rasmiy botiga xush kelibsiz!\n\n"
-                    "📲 <b>Ilovaga 0 so'm SMS xarajat bilan kirish:</b>\n"
+                    "📲 <b>Ilovaga xavfsiz kirish:</b>\n"
                     "Ilovaga xavfsiz kirish uchun pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing va 6 xonali tasdiqlash kodini oling!\n\n"
                     "✨ <b>Imkoniyatlar:</b>\n"
                     " ├ 🐂 Jonivorlar hisobi, vazn dinamikasi va kunlik og'im\n"
@@ -2019,7 +2019,7 @@ def handle_telegram_update(update, bot_token=None):
             "   💡  <b>QO'LLANMA VA YORDAM</b>\n"
             "╰────────────────────────╯\n\n"
             "🔹 <b>1. Mobil ilovaga qanday kiraman?</b>\n"
-            "└ Pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing. Bot sizga 6 xonali maxsus kod beradi. Shu kodni ilovaga kiritib, 0 so'm xarajat bilan kirasiz!\n\n"
+            "└ Pastdagi <b>«📱 Telefon raqamni ulashish»</b> tugmasini bosing. Bot sizga 6 xonali maxsus kod beradi. Shu kodni ilovaga kiritib, tizimga xavfsiz kirasiz!\n\n"
             "🔹 <b>2. APK ilovani qayerdan yuklayman?</b>\n"
             "└ Menyudagi <b>«📥 Ilovani yuklab olish (APK)»</b> tugmasini bosing. Bot ilovaning eng so'nggi rasmiy faylini to'g'ridan-to'g'ri Telegramingizga yuboradi.\n\n"
             "🔹 <b>3. Internet o'chib qolsa hisoblar yo'qolmaydimi?</b>\n"
