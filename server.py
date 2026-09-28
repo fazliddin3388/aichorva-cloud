@@ -582,6 +582,10 @@ def init_cloud_database():
 
 
         conn.commit()
+
+        # Avtomatik ustunlar migratsiyasi (mavjud ma'lumotlarni 100% saqlagan holda)
+        run_cloud_schema_migrations(conn)
+
         print("[DB INIT] Bulutli ma'lumotlar bazasi jadvallari muvaffaqiyatli tayyorlandi!")
     except Exception as e:
         conn.rollback()
@@ -589,6 +593,49 @@ def init_cloud_database():
 
     finally:
         conn.close()
+
+
+def run_cloud_schema_migrations(conn):
+    """Mavjud jadvallarga yangi versiya ustunlarini qo'shish (ma'lumotlarni saqlagan holda)"""
+    cursor = conn.cursor()
+    migrations = [
+        ("app_releases", "version_code", "INTEGER DEFAULT 222"),
+        ("users", "last_active_at", "TIMESTAMP"),
+        ("users", "client_version", "VARCHAR(32)"),
+        ("bulls", "sync_id", "VARCHAR(128)"),
+        ("bulls", "gender", "VARCHAR(32) DEFAULT 'erkak'"),
+        ("bulls", "birth_date", "DATE"),
+        ("weighings", "sync_id", "VARCHAR(128)"),
+        ("feed_logs", "sync_id", "VARCHAR(128)"),
+        ("other_expenses", "sync_id", "VARCHAR(128)"),
+        ("cash_transactions", "sync_id", "VARCHAR(128)"),
+        ("debts", "sync_id", "VARCHAR(128)"),
+        ("debts", "remaining_amount", "NUMERIC(14, 2) DEFAULT 0"),
+        ("debt_payments", "sync_id", "VARCHAR(128)"),
+        ("vaccine_schedules", "sync_id", "VARCHAR(128)"),
+        ("feed_inventory", "sync_id", "VARCHAR(128)")
+    ]
+
+    for table, col, col_type in migrations:
+        try:
+            if not IS_POSTGRES:
+                cursor.execute(f"PRAGMA table_info({table})")
+                cols = [row[1] for row in cursor.fetchall()]
+                if col not in cols:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+            else:
+                cursor.execute(f"""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = '{table}' AND column_name = '{col}'
+                """)
+                if not cursor.fetchone():
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+        except Exception:
+            pass
+    try:
+        conn.commit()
+    except Exception:
+        pass
 
 
 init_cloud_database()
@@ -1031,6 +1078,175 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False, bot_to
         pass
 
 
+def get_current_app_version_info():
+    """Serverdagi eng so'nggi APK va versiya ma'lumotlarini olish"""
+    v_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+    v_info = {
+        "version_name": "1.8",
+        "version_code": 221,
+        "changelog": "Ilovaga kirish soddalashtirildi, avtomatik yangilanish tizimi va o'lchov qo'llanmalari qo'shildi",
+        "apk_size_mb": 5.5,
+        "release_date": datetime.now().strftime("%Y-%m-%d")
+    }
+    if os.path.exists(v_file):
+        try:
+            with open(v_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                v_info["version_name"] = str(data.get("versionName", v_info["version_name"]))
+                v_info["version_code"] = int(data.get("versionCode", v_info["version_code"]))
+                v_info["changelog"] = str(data.get("changelog", v_info["changelog"]))
+                if "sizeMb" in data:
+                    v_info["apk_size_mb"] = float(data["sizeMb"])
+                if "lastBuild" in data:
+                    v_info["release_date"] = str(data["lastBuild"]).split(" ")[0]
+        except Exception:
+            pass
+
+    try:
+        conn = get_db()
+        c = dict_cursor(conn)
+        c.execute(adapt_query("SELECT file_id, file_name, file_size, version_name, changelog, created_at FROM app_releases ORDER BY id DESC LIMIT 1"))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            if row.get("version_name"):
+                v_info["version_name"] = str(row["version_name"]).replace("v", "").strip()
+            if row.get("changelog"):
+                v_info["changelog"] = str(row["changelog"])
+            if row.get("file_size"):
+                v_info["apk_size_mb"] = round(row["file_size"] / (1024 * 1024), 2)
+            if row.get("created_at"):
+                v_info["release_date"] = str(row["created_at"])[:10]
+            v_info["file_id"] = row.get("file_id")
+    except Exception:
+        pass
+
+    return v_info
+
+
+def broadcast_version_update_to_users(version_name=None, changelog=None, size_mb=None, active_token=None):
+    """Barcha fermerlarga yangi versiya haqida xabar va yuklab olish tugmalarini yuborish"""
+    v_info = get_current_app_version_info()
+    v_name = version_name or v_info.get("version_name", "1.8")
+    c_log = changelog or v_info.get("changelog", "Yangi imkoniyatlar va yaxshilanishlar")
+    f_size = size_mb or v_info.get("apk_size_mb", 5.5)
+    tok = active_token or CHORVA_BOT_TOKEN
+
+    # 1. Mobil ilovadagi e'lonlar bo'limiga ham qo'shamiz
+    try:
+        conn_ad = get_db()
+        c_ad = conn_ad.cursor()
+        c_ad.execute(adapt_query("""
+            INSERT INTO advertisements (title, description, category, is_active)
+            VALUES (?, ?, 'version_update', ?)
+        """), (f"Yangi Chorva ERP v{v_name}", c_log, True if IS_POSTGRES else 1))
+        conn_ad.commit()
+        conn_ad.close()
+    except Exception as e:
+        print(f"[VERSION AD ERR]: {e}")
+
+    # 2. Telegram foydalanuvchilarini aniqlaymiz
+    recipients = set()
+    try:
+        conn = get_db()
+        c = dict_cursor(conn)
+        c.execute(adapt_query("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"))
+        for r in c.fetchall():
+            if r.get("telegram_id"):
+                recipients.add(r["telegram_id"])
+        c.execute(adapt_query("SELECT telegram_id FROM prayer_users WHERE telegram_id IS NOT NULL"))
+        for r in c.fetchall():
+            if r.get("telegram_id"):
+                recipients.add(r["telegram_id"])
+        conn.close()
+    except Exception as e:
+        print(f"[GET RECIPIENTS ERR]: {e}")
+
+    if not recipients:
+        print("[BROADCAST VERSION]: Hech qanday foydalanuvchi topilmadi.")
+        return 0
+
+    text_msg = (
+        "╭────────────────────────╮\n"
+        f"   🚀  <b>YANGI VERSIYA: v{v_name}!</b>\n"
+        "╰────────────────────────╯\n\n"
+        "Hurmatli foydalanuvchi! <b>Chorva ERP</b> mobil ilovamizning yangi va yanada mukammal versiyasi taqdim etildi.\n\n"
+        f"✨ <b>Yangiliklar va qulayliklar:</b>\n<i>{c_log}</i>\n\n"
+        f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
+        "🛡 <b>Eslatma:</b> Yangilanganda telefoningizdagi barcha ma'lumotlar to'liq saqlanib qoladi!\n\n"
+        "Pastdagi tugmalar orqali ilovani darhol yuklab oling va o'rnating:"
+    )
+
+    inline_kb = {
+        "inline_keyboard": [
+            [
+                {"text": "📥 Yangi APK ni yuklab olish (Havola)", "url": "https://aichorva-cloud.onrender.com/download/ChorvaERP.apk"}
+            ],
+            [
+                {"text": "📱 Botdan to'g'ridan-to'g'ri yuklash", "callback_data": "dl_latest_apk"}
+            ]
+        ]
+    }
+
+    sent = 0
+    for tid in recipients:
+        try:
+            send_telegram_msg(tid, text_msg, reply_markup=inline_kb, bot_token=tok)
+            sent += 1
+            time.sleep(0.04)
+        except Exception:
+            pass
+
+    print(f"[BROADCAST VERSION COMPLETE]: {sent}/{len(recipients)} foydalanuvchiga yuborildi.")
+    return sent
+
+
+def send_latest_apk_document(chat_id, active_token=None):
+    """Foydalanuvchiga eng so'nggi APK faylini jo'natish"""
+    v_info = get_current_app_version_info()
+    f_size = v_info.get("apk_size_mb", 5.5)
+    v_name = v_info.get("version_name", "1.8")
+    ch_log = v_info.get("changelog", "")
+
+    cap = (
+        "╭────────────────────────╮\n"
+        "   📲  <b>AI CHORVA RASMIY APK</b>\n"
+        "╰────────────────────────╯\n\n"
+        "📁 <b>Fayl:</b> <code>ChorvaERP.apk</code>\n"
+        f"🏷 <b>Versiya:</b> <b>v{v_name}</b>\n"
+        f"📦 <b>Hajmi:</b> <b>{f_size} MB</b>\n"
+    )
+    if ch_log:
+        cap += f"📝 <b>Yangiliklar:</b>\n<i>{ch_log}</i>\n"
+    cap += (
+        "\n────────────────────────\n"
+        "💡 <b>O'rnatish yo'riqnomasi:</b>\n"
+        "1️⃣ Faylni yuklab oling va ustiga bosib telefoningizga o'rnating;\n"
+        "2️⃣ Ma'lumotlaringiz (jonivorlar, o'lchovlar) to'liq saqlanib qoladi!"
+    )
+
+    # 1. Telegram file_id orqali
+    if v_info.get("file_id"):
+        res = send_telegram_document(chat_id, v_info["file_id"], caption=cap, bot_token=active_token)
+        if res:
+            return True
+
+    # 2. Serverdagi mahalliy ChorvaERP.apk
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+    if os.path.exists(local_path):
+        res2 = send_telegram_document(chat_id, local_path, caption=cap, bot_token=active_token)
+        if res2:
+            return True
+
+    # 3. Fallback havola
+    fallback_text = (
+        cap + "\n\n🌐 <b>Yuklab olish havolasi:</b>\n"
+        "👉 https://aichorva-cloud.onrender.com/download/ChorvaERP.apk"
+    )
+    send_telegram_msg(chat_id, fallback_text, bot_token=active_token)
+    return True
+
+
 ADMIN_STATE = {}    # {chat_id: 'waiting_broadcast' | 'replying_12345' | 'waiting_apk'}
 USER_STATE = {}     # {user_id: 'waiting_support'}
 ADMIN_MSG_MAP = {}  # {admin_sent_msg_id: user_id}
@@ -1055,9 +1271,10 @@ def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
     else:
         # 2. AI Chorva Boti (@AIchorvabot)
         if is_admin:
-            # 👑 Bosh Admin uchun to'liq boshqaruv menyusi (ro'yxatdan o'tish yoki adminga murojaat ko'rinmaydi)
+            # 👑 Bosh Admin uchun to'liq boshqaruv menyusi (telefon ulashish va ilovaga kirish kodi bilan)
             kb = [
                 [{"text": "👑 ADMIN BOSHQARUV PANELI"}],
+                [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}, {"text": "🔑 Ilovaga kirish kodi"}],
                 [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "📏 Torozisiz vazn o'lchash"}],
                 [{"text": "🐂 AI Chorva haqida"}, {"text": "👤 Mening profilim"}],
                 [{"text": "📊 Baza statistikasi"}, {"text": "📦 Yangi APK yuklash"}],
@@ -1066,7 +1283,7 @@ def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
         else:
             # 🌾 Oddiy fermer (foydalanuvchi) ko'rinishi
             kb = [
-                [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}],
+                [{"text": "📱 Telefon raqamni ulashish", "request_contact": True}, {"text": "🔑 Ilovaga kirish kodi"}],
                 [{"text": "📥 Ilovani yuklab olish (APK)"}, {"text": "📏 Torozisiz vazn o'lchash"}],
                 [{"text": "🐂 AI Chorva haqida"}, {"text": "👤 Mening profilim"}],
                 [{"text": "✍️ Adminga murojaat"}, {"text": "❓ Qo'llanma va Yordam"}],
@@ -1191,8 +1408,8 @@ def get_admin_panel_menu(is_prayer_bot=False):
         kb = [
             [{"text": "👥 Foydalanuvchilar ro'yxati"}, {"text": "📊 Baza statistikasi"}],
             [{"text": "💾 Bazani yuklab olish"}, {"text": "📥 Bazani tiklash"}],
-            [{"text": "📦 Yangi APK yuklash"}, {"text": "📣 Reklama / E'lon yuborish"}],
-            [{"text": "🔔 Azon eslatmasini sinash"}, {"text": "🔙 Asosiy menyuga qaytish"}],
+            [{"text": "📦 Yangi APK yuklash"}, {"text": "📢 Versiya yangiligini e'lon qilish"}],
+            [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     return {
         "keyboard": kb,
@@ -1544,6 +1761,23 @@ def handle_telegram_update(update, bot_token=None):
                 conn.close()
             return
 
+        if cb_data == "dl_latest_apk":
+            answer_callback_query(cb_id, "APK fayli yuborilmoqda...", bot_token=active_token)
+            send_latest_apk_document(chat_id, active_token)
+            return
+
+        if cb_data == "confirm_broadcast_version" and is_admin:
+            answer_callback_query(cb_id, "Versiya e'loni yuborilmoqda...", show_alert=True, bot_token=active_token)
+            v_info = get_current_app_version_info()
+            edit_telegram_msg(chat_id, msg_id, f"🚀 <b>v{v_info['version_name']} versiyasi haqidagi xabar barcha foydalanuvchilarga tarqatilmoqda...</b>", bot_token=active_token)
+            threading.Thread(target=broadcast_version_update_to_users, args=(v_info['version_name'], v_info['changelog'], v_info['apk_size_mb'], active_token), daemon=True).start()
+            return
+
+        if cb_data == "cancel_broadcast_version" and is_admin:
+            answer_callback_query(cb_id, "Bekor qilindi", bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "❌ <i>Versiya e'loni bekor qilindi.</i>", bot_token=active_token)
+            return
+
         if cb_data.startswith("reply_"):
             target_user = cb_data.replace("reply_", "")
             ADMIN_STATE[chat_id] = f"replying_{target_user}"
@@ -1845,6 +2079,12 @@ def handle_telegram_update(update, bot_token=None):
             except Exception:
                 pass
 
+            # Barcha foydalanuvchilarga yangi versiya haqida avtomatik bildirishnoma tarqatish
+            try:
+                threading.Thread(target=broadcast_version_update_to_users, args=(version_name, changelog, size_mb, active_token), daemon=True).start()
+            except Exception as e:
+                print(f"[BROADCAST VERSION ERR]: {e}")
+
             ADMIN_STATE.pop(chat_id, None)
 
             success_admin_msg = (
@@ -1859,9 +2099,10 @@ def handle_telegram_update(update, bot_token=None):
                 success_admin_msg += f"📝 <b>Izoh / Yangiliklar:</b>\n<i>{changelog}</i>\n\n"
             success_admin_msg += (
                 "────────────────────────\n"
-                "✅ <b>Serverda muvaffaqiyatli saqlandi!</b>\n\n"
+                "✅ <b>Serverda muvaffaqiyatli saqlandi!</b>\n"
+                "📢 <b>Barcha foydalanuvchilarga yangilanish xabari yuborilmoqda...</b>\n\n"
                 "Endi barcha foydalanuvchilar (va siz) botdagi <b>«📥 Ilovani yuklab olish (APK)»</b> "
-                "tugmasini bosganda aynan siz hozir yuklagan ushbu yangi fayl yuboriladi!"
+                "tugmasini bosganda yoki ilova ichidan yangilaganda aynan siz hozir yuklagan ushbu yangi fayl yuboriladi!"
             )
             send_telegram_msg(chat_id, success_admin_msg, reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
             return
@@ -2191,12 +2432,49 @@ def handle_telegram_update(update, bot_token=None):
         parts = text.split()
         session_id = parts[1].replace("auth_", "") if len(parts) > 1 else None
 
+        auth_code_for_admin = None
         if session_id:
             conn = get_db()
             c = conn.cursor()
             try:
-                c.execute(adapt_query("UPDATE auth_sessions SET telegram_id = ? WHERE session_id = ?"), (chat_id, session_id))
-                conn.commit()
+                if is_admin:
+                    # Bosh Admin uchun darhol avtorizatsiyani tasdiqlaymiz va kod generatsiya qilamiz!
+                    c.execute(adapt_query("SELECT id, phone FROM users WHERE telegram_id = ? OR role = 'admin' LIMIT 1"), (user_id,))
+                    u_row = c.fetchone()
+                    admin_phone = "+998973387827"
+                    if u_row:
+                        admin_uid = u_row[0]
+                        if u_row[1]: admin_phone = u_row[1]
+                    else:
+                        if IS_POSTGRES:
+                            c.execute("INSERT INTO users (phone, full_name, telegram_id, telegram_username, is_verified, role) VALUES (%s, %s, %s, %s, TRUE, 'admin') RETURNING id",
+                                      (admin_phone, from_user.get("first_name", "Fazliddin"), user_id, username))
+                            admin_uid = c.fetchone()[0]
+                        else:
+                            c.execute("INSERT INTO users (phone, full_name, telegram_id, telegram_username, is_verified, role) VALUES (?, ?, ?, ?, 1, 'admin')",
+                                      (admin_phone, from_user.get("first_name", "Fazliddin"), user_id, username))
+                            admin_uid = c.lastrowid
+
+                    auth_code_for_admin = "".join(random.choices(string.digits, k=6))
+                    jwt_token = generate_jwt(admin_uid, admin_phone)
+                    expires_at = datetime.utcnow() + timedelta(minutes=60)
+
+                    if IS_POSTGRES:
+                        c.execute("""
+                            UPDATE auth_sessions 
+                            SET phone = %s, auth_code = %s, verified = TRUE, jwt_token = %s, user_id = %s, telegram_id = %s, expires_at = %s
+                            WHERE session_id = %s
+                        """, (admin_phone, auth_code_for_admin, jwt_token, admin_uid, user_id, expires_at, session_id))
+                    else:
+                        c.execute("""
+                            UPDATE auth_sessions 
+                            SET phone = ?, auth_code = ?, verified = 1, jwt_token = ?, user_id = ?, telegram_id = ?, expires_at = ?
+                            WHERE session_id = ?
+                        """, (admin_phone, auth_code_for_admin, jwt_token, admin_uid, user_id, expires_at, session_id))
+                    conn.commit()
+                else:
+                    c.execute(adapt_query("UPDATE auth_sessions SET telegram_id = ? WHERE session_id = ?"), (chat_id, session_id))
+                    conn.commit()
             except Exception as e:
                 print(f"[TG UPDATE ERR]: {e}")
             finally:
@@ -2249,19 +2527,32 @@ def handle_telegram_update(update, bot_token=None):
 
         else:
             if is_admin:
-                welcome_text = (
-                    "╔════════════════════════════╗\n"
-                    "   👑 <b>BOSH ADMIN BOSHQARUVI</b>\n"
-                    "╚════════════════════════════╝\n\n"
-                    f"👋 <b>Assalomu alaykum, Bosh Admin — {from_user.get('first_name', 'Fazliddin')}!</b>\n\n"
-                    "Siz <b>AI Chorva</b> tizimining boshqaruvchisiz. Tizim sizni to'liq tanidi!\n\n"
-                    "👑 <b>Admin boshqaruv imkoniyatlari:</b>\n"
-                    " ├ 👑 <b>Admin Paneli:</b> Reklama, statistika va yangi versiyalar\n"
-                    " ├ 📦 <b>Yangi APK yuklash:</b> Mobil ilovani serverda darhol yangilash\n"
-                    " ├ 📊 <b>Baza statistikasi:</b> Ro'yxatdan o'tgan fermerlar va jonivorlar soni\n"
-                    " └ 🔔 <b>Azon eslatmasi:</b> Bildirishnomalarni sinovdan o'tkazish\n\n"
-                    "👇 <i>Barcha boshqaruv tugmalari pastdagi menyuda faol:</i>"
-                )
+                if auth_code_for_admin:
+                    welcome_text = (
+                        "╔════════════════════════════╗\n"
+                        "   👑 <b>BOSH ADMIN TASDIQLANDI!</b>\n"
+                        "╚════════════════════════════╝\n\n"
+                        f"👋 <b>Assalomu alaykum, Bosh Admin — {from_user.get('first_name', 'Fazliddin')}!</b>\n\n"
+                        "✅ <b>AI Chorva</b> mobil ilovasiga kirishingiz muvaffaqiyatli tasdiqlandi!\n\n"
+                        f"🔑 <b>Bir martalik kirish kodi:</b> <code>{auth_code_for_admin}</code>\n\n"
+                        "📲 <i>Ilovangiz hozir avtomatik ochilmoqda yoki ushbu kodni kiriting!</i>\n\n"
+                        "👇 <i>Barcha boshqaruv tugmalari pastdagi menyuda faol:</i>"
+                    )
+                else:
+                    welcome_text = (
+                        "╔════════════════════════════╗\n"
+                        "   👑 <b>BOSH ADMIN BOSHQARUVI</b>\n"
+                        "╚════════════════════════════╝\n\n"
+                        f"👋 <b>Assalomu alaykum, Bosh Admin — {from_user.get('first_name', 'Fazliddin')}!</b>\n\n"
+                        "Siz <b>AI Chorva</b> tizimining boshqaruvchisiz. Tizim sizni to'liq tanidi!\n\n"
+                        "👑 <b>Admin boshqaruv imkoniyatlari:</b>\n"
+                        " ├ 👑 <b>Admin Paneli:</b> Reklama, statistika va yangi versiyalar\n"
+                        " ├ 🔑 <b>Ilovaga kirish kodi:</b> Mobil ilovaga kod orqali kirish\n"
+                        " ├ 📦 <b>Yangi APK yuklash:</b> Mobil ilovani serverda darhol yangilash\n"
+                        " ├ 📊 <b>Baza statistikasi:</b> Ro'yxatdan o'tgan fermerlar va jonivorlar soni\n"
+                        " └ 🔔 <b>Azon eslatmasi:</b> Bildirishnomalarni sinovdan o'tkazish\n\n"
+                        "👇 <i>Barcha boshqaruv tugmalari pastdagi menyuda faol:</i>"
+                    )
             else:
                 welcome_text = (
                     "╔════════════════════════════╗\n"
@@ -2620,10 +2911,35 @@ def handle_telegram_update(update, bot_token=None):
             "╰────────────────────────╯\n\n"
             "Menga shunchaki yangilangan <code>.apk</code> ilova faylini jo'nating (fayl sifatida).\n\n"
             "💡 <b>Maslahat:</b> Xabar izohiga (caption) yangi versiya raqami yoki yangiliklarni yozib yuborishingiz mumkin (masalan: <code>v1.8 - Yangi dizayn</code>).\n\n"
-            "<i>Fayl kelishi bilan u darhol serverda saqlanadi va barcha foydalanuvchilar yuklab olishi uchun avtomatik faollashadi!</i>\n\n"
+            "<i>Fayl kelishi bilan u darhol serverda saqlanadi, barcha foydalanuvchilarga bildirishnoma boradi va yangi versiya faollashadi!</i>\n\n"
             "<i>Bekor qilish uchun: «❌ Bekor qilish» tugmasini bosing.</i>"
         )
         send_telegram_msg(chat_id, prompt_apk, reply_markup={"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}, bot_token=active_token)
+        return
+
+    # Admin versiya e'lon qilish tugmasini bosganda
+    if is_admin and text in ("📢 Versiya yangiligini e'lon qilish", "/broadcast_version", "Versiya e'lon qilish"):
+        v_info = get_current_app_version_info()
+        prompt_text = (
+            "╭────────────────────────╮\n"
+            "   📢  <b>VERSIYA YANGILIGINI E'LON QILISH</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"🏷 <b>Hozirgi versiya:</b> <b>v{v_info['version_name']} (Kod: {v_info['version_code']})</b>\n"
+            f"📦 <b>Fayl hajmi:</b> <b>{v_info['apk_size_mb']} MB</b>\n"
+            f"📝 <b>Yangiliklar:</b>\n<i>{v_info['changelog']}</i>\n\n"
+            "Barcha Telegram va ilova foydalanuvchilariga yangilanish bildirishnomasi va yuklab olish havolasi yuborilsinmi?"
+        )
+        confirm_kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "🚀 Ha, barcha foydalanuvchilarga yuborish", "callback_data": "confirm_broadcast_version"}
+                ],
+                [
+                    {"text": "❌ Bekor qilish", "callback_data": "cancel_broadcast_version"}
+                ]
+            ]
+        }
+        send_telegram_msg(chat_id, prompt_text, reply_markup=confirm_kb, bot_token=active_token)
         return
 
 
@@ -2703,6 +3019,87 @@ def handle_telegram_update(update, bot_token=None):
         send_telegram_msg(chat_id, prompt, reply_markup={"keyboard": [[{"text": "🚪 Muloqotni yakunlash (Chiqish)"}]], "resize_keyboard": True}, bot_token=active_token)
     if text in ("📏 Torozisiz vazn o'lchash", "/lenta", "/vazn", "/weight"):
         send_lenta_guide(chat_id, animal="menu", bot_token=active_token)
+        return
+
+    # ─── ILOVAGA KIRISH KODI BUYRUG'I (Admin va Fermerlar uchun) ───
+    if text in ("🔑 Ilovaga kirish kodi", "🔑 Kirish kodi", "/login", "/kod", "/auth", "/code"):
+        auth_code = "".join(random.choices(string.digits, k=6))
+        conn = get_db()
+        c = conn.cursor()
+        try:
+            # 1. Foydalanuvchini aniqlaymiz
+            c.execute(adapt_query("SELECT id, phone, role FROM users WHERE telegram_id = ? OR phone LIKE ? LIMIT 1"), (user_id, "%973387827%"))
+            u_row = c.fetchone()
+            if not u_row and is_admin:
+                admin_phone = "+998973387827"
+                if IS_POSTGRES:
+                    c.execute("INSERT INTO users (phone, full_name, telegram_id, telegram_username, is_verified, role) VALUES (%s, %s, %s, %s, TRUE, 'admin') RETURNING id",
+                              (admin_phone, full_u_name or "Fazliddin", user_id, username))
+                    uid = c.fetchone()[0]
+                else:
+                    c.execute("INSERT INTO users (phone, full_name, telegram_id, telegram_username, is_verified, role) VALUES (?, ?, ?, ?, 1, 'admin')",
+                              (admin_phone, full_u_name or "Fazliddin", user_id, username))
+                    uid = c.lastrowid
+                user_phone = admin_phone
+            elif u_row:
+                uid = u_row[0]
+                user_phone = u_row[1] or "+998900000000"
+            else:
+                uid = None
+                user_phone = None
+
+            expires_at = datetime.utcnow() + timedelta(minutes=60)
+            jwt_token = generate_jwt(uid, user_phone) if uid else None
+
+            # Eng oxirgi sessiyani yangilaymiz yoki yangi ochamiz
+            c.execute(adapt_query("SELECT session_id FROM auth_sessions WHERE telegram_id = ? ORDER BY id DESC LIMIT 1"), (user_id,))
+            s_row = c.fetchone()
+            if s_row:
+                s_id = s_row[0]
+                if IS_POSTGRES:
+                    c.execute("""
+                        UPDATE auth_sessions 
+                        SET auth_code = %s, verified = TRUE, jwt_token = %s, user_id = %s, expires_at = %s
+                        WHERE session_id = %s
+                    """, (auth_code, jwt_token, uid, expires_at, s_id))
+                else:
+                    c.execute("""
+                        UPDATE auth_sessions 
+                        SET auth_code = ?, verified = 1, jwt_token = ?, user_id = ?, expires_at = ?
+                        WHERE session_id = ?
+                    """, (auth_code, jwt_token, uid, expires_at, s_id))
+            else:
+                s_id = "".join(random.choices(string.ascii_letters + string.digits, k=24))
+                if IS_POSTGRES:
+                    c.execute("""
+                        INSERT INTO auth_sessions (session_id, telegram_id, phone, auth_code, verified, jwt_token, user_id, expires_at)
+                        VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s)
+                    """, (s_id, user_id, user_phone, auth_code, jwt_token, uid, expires_at))
+                else:
+                    c.execute("""
+                        INSERT INTO auth_sessions (session_id, telegram_id, phone, auth_code, verified, jwt_token, user_id, expires_at)
+                        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                    """, (s_id, user_id, user_phone, auth_code, jwt_token, uid, expires_at))
+            conn.commit()
+
+            role_badge = "👑 <b>BOSH ADMIN HUQUQI</b>\n" if is_admin else "🌾 <b>FERMER HISOBI</b>\n"
+            code_msg = (
+                "╭────────────────────────╮\n"
+                "   🔑  <b>ILOVAGA KIRISH KODI</b>\n"
+                "╰────────────────────────╯\n\n"
+                f"{role_badge}"
+                f"Sizning bir martalik tasdiqlash kodingiz:\n\n"
+                f"👉 <code>{auth_code}</code> 👈\n\n"
+                "────────────────────────\n"
+                "📲 <b>Ilovada nima qilish kerak:</b>\n"
+                "1. <b>AI Chorva</b> mobil ilovasini oching.\n"
+                "2. Yuqoridagi <b>«☁️ Sinxronlash»</b> oynasiga kiring.\n"
+                f"3. Ushbu <b>{auth_code}</b> kodini kiritib, «✅ Kirish» tugmasini bosing!\n\n"
+                "<i>⏱ Kod 60 daqiqa davomida amal qiladi.</i>"
+            )
+            send_telegram_msg(chat_id, code_msg, reply_markup=get_telegram_main_menu(is_admin, is_prayer_bot), bot_token=active_token)
+        finally:
+            conn.close()
         return
 
 
@@ -3062,12 +3459,31 @@ def health_check():
 
 
 @app.route('/download/ChorvaERP.apk', methods=['GET'])
+@app.route('/download/apk', methods=['GET'])
 @app.route('/api/app/download', methods=['GET'])
 def download_latest_apk():
     """Mobil ilovani to'g'ridan-to'g'ri brauzer orqali yuklab olish"""
     local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
     if os.path.exists(local_path):
         return send_file(local_path, as_attachment=True, download_name="ChorvaERP.apk", mimetype="application/vnd.android.package-archive")
+
+    # Agar mahalliy diskda bo'lmasa, eng so'nggi Telegram file_id dan uzatish
+    try:
+        conn = get_db()
+        c = dict_cursor(conn)
+        c.execute(adapt_query("SELECT file_id FROM app_releases ORDER BY id DESC LIMIT 1"))
+        row = c.fetchone()
+        conn.close()
+        if row and row.get("file_id") and CHORVA_BOT_TOKEN:
+            file_id = row["file_id"]
+            r = requests.get(f"https://api.telegram.org/bot{CHORVA_BOT_TOKEN}/getFile?file_id={file_id}", timeout=15)
+            if r.status_code == 200:
+                fpath = r.json().get("result", {}).get("file_path")
+                if fpath:
+                    return redirect(f"https://api.telegram.org/file/bot{CHORVA_BOT_TOKEN}/{fpath}", code=302)
+    except Exception as e:
+        print(f"[APK STREAM ERR]: {e}")
+
     return redirect("https://github.com/fazliddin3388/aichorva-cloud/releases", code=302)
 
 
@@ -3086,23 +3502,24 @@ def serve_cloud_image(filename):
 
 
 @app.route('/api/app/latest', methods=['GET'])
+@app.route('/api/app/version', methods=['GET'])
 def get_latest_app_release():
-    """Eng so'nggi mobil ilova versiyasi haqida ma'lumot"""
-    conn = get_db()
-    c = dict_cursor(conn)
-    try:
-        c.execute(adapt_query("SELECT id, file_name, file_size, version_name, changelog, created_at FROM app_releases ORDER BY id DESC LIMIT 1"))
-        row = c.fetchone()
-        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
-        has_local = os.path.exists(local_path)
-        return jsonify({
-            "status": "success",
-            "release": dict(row) if row else None,
-            "has_local_apk": has_local,
-            "download_url": "/download/ChorvaERP.apk"
-        })
-    finally:
-        conn.close()
+    """Eng so'nggi mobil ilova versiyasi haqida to'liq ma'lumot"""
+    v_info = get_current_app_version_info()
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ChorvaERP.apk")
+    has_local = os.path.exists(local_path)
+
+    return jsonify({
+        "status": "success",
+        "version_name": v_info.get("version_name", "1.8"),
+        "version_code": v_info.get("version_code", 221),
+        "changelog": v_info.get("changelog", "Yangi imkoniyatlar va yaxshilanishlar"),
+        "apk_size_mb": v_info.get("apk_size_mb", 5.5),
+        "release_date": v_info.get("release_date", "2026-09-28"),
+        "has_local_apk": has_local,
+        "download_url": "/download/ChorvaERP.apk",
+        "direct_download_url": "https://aichorva-cloud.onrender.com/download/ChorvaERP.apk"
+    })
 
 
 @app.route('/api/prayer/regions', methods=['GET'])
@@ -3209,45 +3626,95 @@ def verify_code():
     session_id = data.get("session_id")
     code = str(data.get("code", "")).strip()
 
+    if not code:
+        return jsonify({"status": "error", "message": "Tasdiqlash kodi kiritilmadi"}), 400
+
     conn = get_db()
     c = dict_cursor(conn)
     try:
-        c.execute(adapt_query("SELECT verified, jwt_token, auth_code, user_id, phone, expires_at FROM auth_sessions WHERE session_id = ?"), (session_id,))
-        row = c.fetchone()
-        if not row:
-            return jsonify({"status": "error", "message": "Sessiya topilmadi yoki eskirgan"}), 404
+        row = None
+        # 1-usul: Agar session_id mavjud bo'lsa va unda shu kod bo'lsa
+        if session_id:
+            c.execute(adapt_query("""
+                SELECT id, session_id, verified, jwt_token, auth_code, user_id, phone, telegram_id, expires_at 
+                FROM auth_sessions 
+                WHERE session_id = ? AND auth_code = ?
+            """), (session_id, code))
+            row = c.fetchone()
 
-        # Sessiya muddatini tekshirish (15 daqiqa)
+        # 2-usul: Agar session_id bo'yicha chiqmasa, aynan shu auth_code bo'yicha eng so'nggi faol sessiyani topamiz!
+        if not row:
+            c.execute(adapt_query("""
+                SELECT id, session_id, verified, jwt_token, auth_code, user_id, phone, telegram_id, expires_at 
+                FROM auth_sessions 
+                WHERE auth_code = ? 
+                ORDER BY id DESC LIMIT 1
+            """), (code,))
+            row = c.fetchone()
+
+        if not row:
+            return jsonify({"status": "error", "message": "Noto'g'ri tasdiqlash kodi yoki kod muddati tugagan"}), 400
+
+        # Sessiya muddatini tekshirish (60 daqiqa)
         if row.get("expires_at"):
             exp_dt = row["expires_at"]
             if isinstance(exp_dt, str):
-                try:
-                    exp_dt = datetime.strptime(exp_dt, "%Y-%m-%d %H:%M:%S.%f")
+                try: exp_dt = datetime.strptime(exp_dt, "%Y-%m-%d %H:%M:%S.%f")
                 except Exception:
-                    pass
+                    try: exp_dt = datetime.strptime(exp_dt, "%Y-%m-%d %H:%M:%S")
+                    except Exception: pass
             if isinstance(exp_dt, datetime) and exp_dt < datetime.utcnow():
-                return jsonify({"status": "error", "message": "Tasdiqlash kodi muddati tugagan. Qaytadan urinib ko'ring."}), 400
+                return jsonify({"status": "error", "message": "Tasdiqlash kodi muddati tugagan. Qaytadan yangi kod oling."}), 400
 
-        # Kod to'g'riligini tekshirish
-        if not row.get("auth_code") or not row.get("user_id"):
+        user_id = row.get("user_id")
+        user_phone = row.get("phone")
+        tg_id = row.get("telegram_id")
+
+        # Agar user_id hali sessiyaga ulanmagan bo'lsa
+        if not user_id and tg_id:
+            u_cur = dict_cursor(conn)
+            u_cur.execute(adapt_query("SELECT id, phone, role FROM users WHERE telegram_id = ? LIMIT 1"), (tg_id,))
+            u_find = u_cur.fetchone()
+            if u_find:
+                user_id = u_find["id"]
+                user_phone = u_find.get("phone") or user_phone
+            elif is_admin_user(tg_id, phone=user_phone):
+                u_cur.execute(adapt_query("SELECT id, phone FROM users WHERE role = 'admin' LIMIT 1"))
+                u_admin = u_cur.fetchone()
+                if u_admin:
+                    user_id = u_admin["id"]
+                    user_phone = u_admin["phone"]
+
+        # Agar hanuz user_id bo'lmasa, lekin Bosh Admin bo'lsa:
+        if not user_id and (is_admin_user(tg_id, phone=user_phone) or tg_id == 225011967):
+            u_cur = dict_cursor(conn)
+            u_cur.execute(adapt_query("SELECT id, phone FROM users WHERE role = 'admin' OR telegram_id = 225011967 LIMIT 1"))
+            u_adm = u_cur.fetchone()
+            if u_adm:
+                user_id = u_adm["id"]
+                user_phone = u_adm["phone"]
+
+        if not user_id:
             return jsonify({"status": "error", "message": "Iltimos, avval Telegram botda telefon raqamingizni ulashing!"}), 400
 
-        if row["auth_code"] == code:
-            u_cur = dict_cursor(conn)
-            u_cur.execute(adapt_query("SELECT id, phone, full_name, farm_name FROM users WHERE id = ?"), (row["user_id"],))
-            user_data = u_cur.fetchone()
-            token = row["jwt_token"] or generate_jwt(row["user_id"], row["phone"])
+        # Foydalanuvchi ma'lumotlarini yuklaymiz
+        u_cur = dict_cursor(conn)
+        u_cur.execute(adapt_query("SELECT id, phone, full_name, farm_name, role FROM users WHERE id = ?"), (user_id,))
+        user_data = u_cur.fetchone()
 
-            # 🛡️ XAVFSIZLIK FILTRI 2: Kodni bir martalik qilish (qayta ishlatib bo'lmasligi uchun tozalash)
-            c.execute(adapt_query("UPDATE auth_sessions SET auth_code = NULL WHERE session_id = ?"), (session_id,))
-            conn.commit()
+        token = row.get("jwt_token") or generate_jwt(user_id, user_phone or "+998900000000")
 
-            return jsonify({
-                "status": "success",
-                "token": token,
-                "user": dict(user_data) if user_data else {"id": row["user_id"], "phone": row["phone"]}
-            })
-        return jsonify({"status": "error", "message": "Noto'g'ri tasdiqlash kodi"}), 400
+        # Sessiyani tasdiqlangan qilib qo'yamiz va kodni tozalaymiz
+        target_s_id = row["session_id"]
+        c.execute(adapt_query("UPDATE auth_sessions SET verified = 1, jwt_token = ?, auth_code = NULL, user_id = ? WHERE session_id = ?"), 
+                  (token, user_id, target_s_id))
+        conn.commit()
+
+        return jsonify({
+            "status": "success",
+            "token": token,
+            "user": dict(user_data) if user_data else {"id": user_id, "phone": user_phone, "role": "admin" if is_admin_user(tg_id, phone=user_phone) else "farmer"}
+        })
     finally:
         conn.close()
 
