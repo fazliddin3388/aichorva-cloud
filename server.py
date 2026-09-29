@@ -1829,14 +1829,12 @@ def import_database_json(data):
 
 
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "fazliddin3388/aichorva-cloud")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
 def get_effective_github_token():
     tok = os.environ.get("GITHUB_TOKEN", "").strip()
     if not tok:
         tok = (get_system_setting("github_token", "") or "").strip()
-    if not tok:
-        tok = GITHUB_TOKEN.strip()
     return tok
 
 
@@ -1935,55 +1933,29 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
             set_system_setting("last_backup_date", today_date)
             set_system_setting("last_backup_time", now_str)
 
-            # 4. Agar SQLite (.db) fayli mavjud bo'lsa, uni ham GitHub ga database_backup/chorva_cloud.db sifatida yuklaymiz!
-            if not IS_POSTGRES and os.path.exists(LOCAL_DB_FILE):
-                try:
-                    with open(LOCAL_DB_FILE, "rb") as db_f:
-                        db_bytes = db_f.read()
-                    db_b64 = base64.b64encode(db_bytes).decode("utf-8")
-                    db_file_path = "database_backup/chorva_cloud.db"
-                    db_api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{db_file_path}"
-                    db_sha = None
-                    try:
-                        db_get = requests.get(db_api_url, headers=gh_headers, timeout=15)
-                        if db_get.status_code == 200:
-                            db_sha = db_get.json().get("sha")
-                    except Exception:
-                        pass
-                    db_put_body = {
-                        "message": f"🤖 Avtomatik kunlik SQLite DB zaxirasi: {now_str} (Render -> GitHub)",
-                        "content": db_b64,
-                        "branch": "main"
-                    }
-                    if db_sha:
-                        db_put_body["sha"] = db_sha
-                    requests.put(db_api_url, headers=gh_headers, json=db_put_body, timeout=30)
-                except Exception as e_db:
-                    print(f"[GITHUB DB FILE UPLOAD ERR]: {e_db}")
-
             success_gh = (
                 "╭────────────────────────╮\n"
                 "   🎉  <b>GITHUBGA MUVAFFAQIYATLI YUKLANDI!</b>\n"
                 "╰────────────────────────╯\n\n"
                 f"📁 <b>Repository:</b> <a href='https://github.com/{GITHUB_REPO}'>{GITHUB_REPO}</a>\n"
-                f"📄 <b>Fayllar:</b>\n"
-                f" • <code>database_backup/chorva_database_backup.json</code> (Universal ma'lumotlar)\n"
-                f" • <code>database_backup/chorva_cloud.db</code> (SQLite bazasi)\n"
+                f"📄 <b>Fayl:</b> <code>database_backup/chorva_database_backup.json</code> (14 ta jadval to'liq)\n"
                 f"📅 <b>Vaqt:</b> {now_str}\n"
                 f"🔄 <b>Holat:</b> Eskisi yangisiga almashtirildi (Updated)\n\n"
-                "✅ <i>Endi barcha ma'lumotlar bazasi ham JSON, ham .DB formatda GitHub kodingiz bilan birga xavfsiz saqlanmoqda!</i>"
+                "✅ <i>Barcha ma'lumotlar bazasi GitHub kodingiz bilan birga xavfsiz saqlanmoqda!</i>"
             )
             if chat_id:
                 send_telegram_msg(chat_id, success_gh, bot_token=CHORVA_BOT_TOKEN)
             print(f"[GITHUB BACKUP SUCCESS]: {now_str}")
             return True, "Muvaffaqiyatli saqlandi"
         else:
+            set_system_setting("last_backup_date", today_date)
             err_msg = f"GitHub API xatosi ({put_resp.status_code}): {put_resp.text[:150]}"
             print(f"[GITHUB BACKUP ERR]: {err_msg}")
             if chat_id:
-                send_telegram_msg(chat_id, f"⚠️ <b>GitHub ga yuklashda xatolik:</b>\n<code>{err_msg}</code>", bot_token=CHORVA_BOT_TOKEN)
+                send_telegram_msg(chat_id, f"⚠️ <b>GitHub ga yuklashda xatolik:</b>\n<code>{err_msg}</code>\n\n<i>(Xotirjam bo'ling: bugungi zaxira nusxasi yuqorida Telegram orqali sizga to'liq yuborildi!)</i>", bot_token=CHORVA_BOT_TOKEN)
             return False, err_msg
     except Exception as ex:
+        set_system_setting("last_backup_date", today_date)
         print(f"[BACKUP FATAL ERR]: {ex}")
         traceback.print_exc()
         if chat_id:
@@ -1992,7 +1964,7 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
 
 
 def daily_db_backup_scheduler_thread():
-    """Har 15 daqiqada tekshiradi. Har kuni Toshkent vaqti bilan 03:00 da yoki yangi kunda 1 marta GitHub ga avtomatik zaxiralaydi"""
+    """Har 15 daqiqada tekshiradi. Kuniga faqat 1 marta Toshkent vaqti bilan 03:00 dan keyin ishga tushadi"""
     print("[SCHEDULER] Kunlik baza zaxira monitoringi ishga tushdi...")
     while True:
         try:
@@ -2000,8 +1972,11 @@ def daily_db_backup_scheduler_thread():
             today_str = now_dt.strftime("%Y-%m-%d")
             last_date = get_system_setting("last_backup_date", "")
 
-            # Agar bugun hali zaxira qilinmagan bo'lsa va soat >= 03:00 bo'lsa
+            # Faqat bugun hali qilinmagan bo'lsa va soat 03:00 dan o'tgan bo'lsa
             if last_date != today_str and now_dt.hour >= 3:
+                # Qayta-qayta har 15 daqiqada xabar tashlab spam qilmasligi uchun
+                # Avval bugungi sanani belgilab olamiz
+                set_system_setting("last_backup_date", today_str)
                 print(f"[SCHEDULER] Kunlik zaxira boshlanmoqda: {today_str}")
                 backup_database_to_github(triggered_by="cron", chat_id=ADMIN_ID)
 
