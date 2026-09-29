@@ -692,7 +692,14 @@ def run_cloud_schema_migrations(conn):
         ("advertisements", "media_type", "VARCHAR(32) DEFAULT 'text'"),
         ("advertisements", "media_file_id", "TEXT"),
         ("advertisements", "views_count", "INTEGER DEFAULT 0"),
-        ("advertisements", "sent_count", "INTEGER DEFAULT 0")
+        ("advertisements", "sent_count", "INTEGER DEFAULT 0"),
+        ("bulls", "mother_id", "INTEGER"),
+        ("bulls", "mother_tag", "VARCHAR(64)" if IS_POSTGRES else "TEXT"),
+        ("bulls", "breeding_status", "VARCHAR(32)" if IS_POSTGRES else "TEXT"),
+        ("bulls", "breeding_date", "VARCHAR(32)" if IS_POSTGRES else "TEXT"),
+        ("bulls", "expected_birth_date", "VARCHAR(32)" if IS_POSTGRES else "TEXT"),
+        ("bulls", "birth_count", "INTEGER DEFAULT 0"),
+        ("bulls", "last_birth_date", "VARCHAR(32)" if IS_POSTGRES else "TEXT")
     ]
 
     for table, col, col_type in migrations:
@@ -711,6 +718,55 @@ def run_cloud_schema_migrations(conn):
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
         except Exception:
             pass
+
+    # Nasl olish jurnali jadvali (breeding_records)
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS breeding_records (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                mother_id INTEGER,
+                mother_tag VARCHAR(64) NOT NULL,
+                animal_type VARCHAR(64) DEFAULT 'Sovliq',
+                breeding_date VARCHAR(32),
+                breeding_method VARCHAR(64),
+                sire_info VARCHAR(128),
+                status VARCHAR(32) DEFAULT 'kutilmoqda',
+                expected_birth_date VARCHAR(32),
+                birth_date VARCHAR(32),
+                birth_result VARCHAR(64),
+                birth_count INTEGER DEFAULT 0,
+                offspring_tag VARCHAR(64),
+                offspring_type VARCHAR(64),
+                offspring_weight REAL,
+                notes TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """ if IS_POSTGRES else """
+            CREATE TABLE IF NOT EXISTS breeding_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mother_id INTEGER,
+                mother_tag TEXT NOT NULL,
+                animal_type TEXT DEFAULT 'Sovliq',
+                breeding_date TEXT,
+                breeding_method TEXT,
+                sire_info TEXT,
+                status TEXT DEFAULT 'kutilmoqda',
+                expected_birth_date TEXT,
+                birth_date TEXT,
+                birth_result TEXT,
+                birth_count INTEGER DEFAULT 0,
+                offspring_tag TEXT,
+                offspring_type TEXT,
+                offspring_weight REAL,
+                notes TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+    except Exception as e:
+        print(f"[BREEDING TABLE MIGRATION ERR]: {e}")
 
     # Eski 'v1.7' yozuvlarini yangi 'v1.8' ga xavfsiz yangilash
     try:
@@ -4952,6 +5008,13 @@ def cloud_sync():
             sweight = float(b.get("sold_weight", 0.0)) if b.get("sold_weight") else None
             sprice = float(b.get("sold_price_total", 0.0)) if b.get("sold_price_total") else None
             notes = b.get("notes", "")
+            mid = b.get("mother_id")
+            mtag = b.get("mother_tag")
+            b_stat = b.get("breeding_status")
+            b_date = b.get("breeding_date")
+            exp_b_date = b.get("expected_birth_date")
+            b_cnt = int(b.get("birth_count", 0)) if b.get("birth_count") is not None else 0
+            last_b_date = b.get("last_birth_date")
 
             c.execute(adapt_query("SELECT id FROM bulls WHERE user_id = ? AND tag_id = ?"), (user_id, tag_id))
             ex = c.fetchone()
@@ -4960,17 +5023,21 @@ def cloud_sync():
                 c.execute(adapt_query("""
                     UPDATE bulls 
                     SET animal_type=?, breed=?, buy_date=?, buy_price=?, initial_weight=?,
-                        current_weight=?, status=?, sold_date=?, sold_weight=?, sold_price_total=?, notes=?
+                        current_weight=?, status=?, sold_date=?, sold_weight=?, sold_price_total=?, notes=?,
+                        mother_id=?, mother_tag=?, breeding_status=?, breeding_date=?, expected_birth_date=?,
+                        birth_count=?, last_birth_date=?
                     WHERE id = ? AND user_id = ?
-                """), (atype, breed, bdate, bprice, iweight, cweight, status, sdate, sweight, sprice, notes, bid, user_id))
+                """), (atype, breed, bdate, bprice, iweight, cweight, status, sdate, sweight, sprice, notes,
+                       mid, mtag, b_stat, b_date, exp_b_date, b_cnt, last_b_date, bid, user_id))
             else:
                 c.execute(adapt_query("""
-                    INSERT INTO bulls (user_id, tag_id, animal_type, breed, buy_date, buy_price, initial_weight, current_weight, status, sold_date, sold_weight, sold_price_total, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+                    INSERT INTO bulls (user_id, tag_id, animal_type, breed, buy_date, buy_price, initial_weight, current_weight, status, sold_date, sold_weight, sold_price_total, notes, mother_id, mother_tag, breeding_status, breeding_date, expected_birth_date, birth_count, last_birth_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
                 """ if IS_POSTGRES else """
-                    INSERT INTO bulls (user_id, tag_id, animal_type, breed, buy_date, buy_price, initial_weight, current_weight, status, sold_date, sold_weight, sold_price_total, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """), (user_id, tag_id, atype, breed, bdate, bprice, iweight, cweight, status, sdate, sweight, sprice, notes))
+                    INSERT INTO bulls (user_id, tag_id, animal_type, breed, buy_date, buy_price, initial_weight, current_weight, status, sold_date, sold_weight, sold_price_total, notes, mother_id, mother_tag, breeding_status, breeding_date, expected_birth_date, birth_count, last_birth_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """), (user_id, tag_id, atype, breed, bdate, bprice, iweight, cweight, status, sdate, sweight, sprice, notes,
+                       mid, mtag, b_stat, b_date, exp_b_date, b_cnt, last_b_date))
                 bid = c.fetchone()[0] if IS_POSTGRES else c.lastrowid
                 counts["bulls"] += 1
             bull_tag_to_id[tag_id] = bid
@@ -5130,13 +5197,55 @@ def cloud_sync():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """), (user_id, bid, tag_id, vname, pdate, cdate, dose, vet, status, cost, notes))
 
+        # 9. Nasl olish va Tug'ruqlar (Breeding Records)
+        counts["breeding_records"] = 0
+        for br in payload.get("breeding_records", []):
+            mtag = str(br.get("mother_tag", "")).strip()
+            mbid = bull_tag_to_id.get(mtag) if mtag else None
+            atype = br.get("animal_type", "Sovliq")
+            br_date = br.get("breeding_date")
+            br_method = br.get("breeding_method")
+            sire = br.get("sire_info")
+            stat = br.get("status", "kutilmoqda")
+            exp_b_date = br.get("expected_birth_date")
+            birth_d = br.get("birth_date")
+            b_res = br.get("birth_result")
+            b_cnt = int(br.get("birth_count", 0)) if br.get("birth_count") is not None else 0
+            off_tag = br.get("offspring_tag")
+            off_type = br.get("offspring_type")
+            off_weight = float(br.get("offspring_weight", 0.0)) if br.get("offspring_weight") else None
+            b_notes = br.get("notes", "")
+
+            c.execute(adapt_query("""
+                SELECT id FROM breeding_records WHERE user_id = ? AND mother_tag = ? AND (breeding_date = ? OR (birth_date IS NOT NULL AND birth_date = ?))
+            """), (user_id, mtag, br_date, birth_d))
+            ex_br = c.fetchone()
+            if ex_br:
+                c.execute(adapt_query("""
+                    UPDATE breeding_records
+                    SET animal_type=?, breeding_date=?, breeding_method=?, sire_info=?, status=?,
+                        expected_birth_date=?, birth_date=?, birth_result=?, birth_count=?,
+                        offspring_tag=?, offspring_type=?, offspring_weight=?, notes=?
+                    WHERE id = ? AND user_id = ?
+                """), (atype, br_date, br_method, sire, stat, exp_b_date, birth_d, b_res, b_cnt, off_tag, off_type, off_weight, b_notes, ex_br[0], user_id))
+            else:
+                c.execute(adapt_query("""
+                    INSERT INTO breeding_records (user_id, mother_id, mother_tag, animal_type, breeding_date, breeding_method, sire_info, status, expected_birth_date, birth_date, birth_result, birth_count, offspring_tag, offspring_type, offspring_weight, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """), (user_id, mbid, mtag, atype, br_date, br_method, sire, stat, exp_b_date, birth_d, b_res, b_cnt, off_tag, off_type, off_weight, b_notes))
+                counts["breeding_records"] += 1
+
         conn.commit()
 
         # PULL: Foydalanuvchining bulutdagi barcha yangi ma'lumotlarini qaytarish
         pull_data = {}
         c_dict = dict_cursor(conn)
 
-        c_dict.execute(adapt_query("SELECT tag_id, animal_type, breed, buy_date, buy_price, initial_weight, current_weight, status, sold_date, sold_weight, sold_price_total, notes FROM bulls WHERE user_id = ?"), (user_id,))
+        c_dict.execute(adapt_query("""
+            SELECT tag_id, animal_type, breed, buy_date, buy_price, initial_weight, current_weight, status, sold_date, sold_weight, sold_price_total, notes,
+                   mother_id, mother_tag, breeding_status, breeding_date, expected_birth_date, birth_count, last_birth_date
+            FROM bulls WHERE user_id = ?
+        """), (user_id,))
         pull_data["bulls"] = [dict(r) for r in c_dict.fetchall()]
 
         c_dict.execute(adapt_query("SELECT tag_id, weigh_date, weight, gain_since_last, daily_gain_g FROM weighings WHERE user_id = ?"), (user_id,))
@@ -5159,6 +5268,12 @@ def cloud_sync():
 
         c_dict.execute(adapt_query("SELECT tag_id, vaccine_name, planned_date, completed_date, dose, veterinarian, status, cost, notes FROM vaccine_schedules WHERE user_id = ?"), (user_id,))
         pull_data["vaccine_schedules"] = [dict(r) for r in c_dict.fetchall()]
+
+        c_dict.execute(adapt_query("""
+            SELECT mother_id, mother_tag, animal_type, breeding_date, breeding_method, sire_info, status, expected_birth_date, birth_date, birth_result, birth_count, offspring_tag, offspring_type, offspring_weight, notes
+            FROM breeding_records WHERE user_id = ?
+        """), (user_id,))
+        pull_data["breeding_records"] = [dict(r) for r in c_dict.fetchall()]
 
         return jsonify({
             "status": "success",
