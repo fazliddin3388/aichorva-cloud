@@ -1964,12 +1964,14 @@ def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
         "text": "📝 Matnli e'lon"
     }
 
+    format_label = type_names.get(m_type, "📝 Matnli e'lon")
+
     report_text = (
         "╭────────────────────────╮\n"
         "   📊  <b>REKLAMA TARQATISH HISOBOTI</b>\n"
         "╰────────────────────────╯\n\n"
         f"🏷 <b>E'lon:</b> <i>«{ad_title}»</i>\n"
-        f"📂 <b>Format:</b> <b>{type_names.get(m_type, '📝 Matnli e\'lon')}</b>\n"
+        f"📂 <b>Format:</b> <b>{format_label}</b>\n"
         f"📅 <b>Sana:</b> {start_date} | 🕒 <b>Vaqt:</b> {start_str} ➔ {end_str}\n\n"
         "📈 <b>NATIJALAR TAHLILI:</b>\n"
         f" • 👥 <b>Umumiy auditoriya:</b> <b>{total_recipients} ta</b>\n"
