@@ -619,6 +619,17 @@ def init_cloud_database():
     finally:
         conn.close()
 
+    # ─── SERVER ISHGA TUSHGANDA GITHUB'DAN BAZANI AVTOMATIK TIKLASH ───
+    try:
+        def _deferred_restore():
+            time.sleep(1)
+            fn = globals().get("auto_restore_database_from_github")
+            if fn:
+                fn()
+        threading.Thread(target=_deferred_restore, daemon=True).start()
+    except Exception as e_res:
+        print(f"[AUTO RESTORE TRIGGER ERR]: {e_res}")
+
 
 def get_system_setting(key, default=None):
     """Tizim sozlamasini ma'lumotlar bazasidan xavfsiz o'qish"""
@@ -677,7 +688,11 @@ def run_cloud_schema_migrations(conn):
         ("debts", "remaining_amount", "NUMERIC(14, 2) DEFAULT 0"),
         ("debt_payments", "sync_id", "VARCHAR(128)"),
         ("vaccine_schedules", "sync_id", "VARCHAR(128)"),
-        ("feed_inventory", "sync_id", "VARCHAR(128)")
+        ("feed_inventory", "sync_id", "VARCHAR(128)"),
+        ("advertisements", "media_type", "VARCHAR(32) DEFAULT 'text'"),
+        ("advertisements", "media_file_id", "TEXT"),
+        ("advertisements", "views_count", "INTEGER DEFAULT 0"),
+        ("advertisements", "sent_count", "INTEGER DEFAULT 0")
     ]
 
     for table, col, col_type in migrations:
@@ -1208,6 +1223,89 @@ def send_telegram_photo(chat_id, photo, caption=None, reply_markup=None, bot_tok
     return None
 
 
+def send_telegram_video(chat_id, video, caption=None, reply_markup=None, bot_token=None):
+    """Telegram orqali video yuborish (Mahalliy fayl yoki file_id)"""
+    tok = bot_token or CHORVA_BOT_TOKEN
+    if not tok:
+        return None
+    url = f"https://api.telegram.org/bot{tok}/sendVideo"
+
+    # 1. Agar video diskdagi mahalliy fayl bo'lsa
+    if isinstance(video, str) and os.path.exists(video):
+        try:
+            with open(video, "rb") as f_obj:
+                files = {"video": (os.path.basename(video), f_obj, "video/mp4")}
+                data = {"chat_id": chat_id, "parse_mode": "HTML"}
+                if caption: data["caption"] = caption
+                if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
+                r = requests.post(url, data=data, files=files, timeout=60)
+                if r.status_code == 200:
+                    return r.json().get("result")
+                print(f"[TG VIDEO FILE ERR]: status={r.status_code} body={r.text}")
+        except Exception as e:
+            print(f"[TG VIDEO FILE EXCEPTION]: {e}")
+            return None
+
+    # 2. Agar video file_id yoki URL bo'lsa
+    payload = {"chat_id": chat_id, "video": video, "parse_mode": "HTML"}
+    if caption: payload["caption"] = caption
+    if reply_markup: payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+        if r.status_code == 200:
+            return r.json().get("result")
+        print(f"[TG VIDEO ERR]: status={r.status_code} body={r.text}")
+    except Exception as e:
+        print(f"[TG VIDEO ERR]: {e}")
+    return None
+
+
+def send_telegram_media_generic(chat_id, media_type, file_id_or_path, text_content=None, reply_markup=None, bot_token=None):
+    """
+    Universal media jo'natish funksiyasi (text, photo, video, document).
+    Qaytaradi: (success: bool, is_blocked: bool, error_msg: str)
+    """
+    tok = bot_token or CHORVA_BOT_TOKEN
+    if not tok:
+        return False, False, "Token mavjud emas"
+
+    m_type = (media_type or "text").lower()
+    
+    if m_type == "photo" and file_id_or_path:
+        url = f"https://api.telegram.org/bot{tok}/sendPhoto"
+        payload = {"chat_id": chat_id, "photo": file_id_or_path, "caption": text_content or "", "parse_mode": "HTML"}
+    elif m_type == "video" and file_id_or_path:
+        url = f"https://api.telegram.org/bot{tok}/sendVideo"
+        payload = {"chat_id": chat_id, "video": file_id_or_path, "caption": text_content or "", "parse_mode": "HTML"}
+    elif m_type in ("document", "file") and file_id_or_path:
+        url = f"https://api.telegram.org/bot{tok}/sendDocument"
+        payload = {"chat_id": chat_id, "document": file_id_or_path, "caption": text_content or "", "parse_mode": "HTML"}
+    else:
+        url = f"https://api.telegram.org/bot{tok}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text_content or "", "parse_mode": "HTML"}
+
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        r = requests.post(url, json=payload, timeout=20)
+        if r.status_code == 200:
+            return True, False, ""
+        
+        resp_text = r.text.lower()
+        if "entity" in resp_text or "parse" in resp_text:
+            payload.pop("parse_mode", None)
+            r2 = requests.post(url, json=payload, timeout=20)
+            if r2.status_code == 200:
+                return True, False, ""
+            resp_text = r2.text.lower()
+
+        is_blocked = ("blocked" in resp_text or "deactivated" in resp_text or "chat not found" in resp_text or "forbidden" in resp_text)
+        return False, is_blocked, resp_text[:120]
+    except Exception as e:
+        return False, False, str(e)
+
+
 def edit_telegram_msg(chat_id, message_id, text, reply_markup=None, bot_token=None):
     tok = bot_token or CHORVA_BOT_TOKEN
     if not tok:
@@ -1443,9 +1541,10 @@ def send_latest_apk_document(chat_id, active_token=None):
     return True
 
 
-ADMIN_STATE = {}    # {chat_id: 'waiting_broadcast' | 'replying_12345' | 'waiting_apk'}
-USER_STATE = {}     # {user_id: 'waiting_support'}
-ADMIN_MSG_MAP = {}  # {admin_sent_msg_id: user_id}
+ADMIN_STATE = {}        # {chat_id: 'waiting_broadcast' | 'replying_12345' | 'waiting_apk' | 'waiting_edit_ad_1'}
+USER_STATE = {}         # {user_id: 'waiting_support'}
+ADMIN_MSG_MAP = {}      # {admin_sent_msg_id: user_id}
+PENDING_BROADCASTS = {} # {chat_id: {'type': 'text'|'photo'|'video'|'document', 'file_id': ..., 'text': ..., 'caption': ...}}
 
 def get_telegram_main_menu(is_admin=False, is_prayer_bot=False):
     """Foydalanuvchilar va Bosh Admin uchun alohida moslashtirilgan asosiy menyu"""
@@ -1593,11 +1692,262 @@ def send_lenta_guide(chat_id, animal="menu", bot_token=None):
         send_telegram_msg(chat_id, intro_text, reply_markup=kb, bot_token=tok)
 
 
+def get_ads_hub_keyboard():
+    """Reklama va E'lonlar markazi asosiy boshqaruv inline menyusi"""
+    return {
+        "inline_keyboard": [
+            [{"text": "🚀 Yangi Reklama / E'lon yaratish", "callback_data": "ad_hub_new"}],
+            [{"text": "📋 Barcha reklamalar ro'yxati (Boshqaruv)", "callback_data": "ad_hub_list_1"}],
+            [{"text": "📊 Oxirgi tarqatish hisoboti & Audit", "callback_data": "ad_hub_report"}],
+            [{"text": "🔙 Boshqaruv paneliga qaytish", "callback_data": "ad_hub_back_panel"}]
+        ]
+    }
+
+
+def format_advertisements_list(page=1, per_page=5):
+    """Bazadagi barcha reklamalarni sahifalab boshqarish uchun chiqarish"""
+    conn = get_db()
+    c = dict_cursor(conn)
+    try:
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM advertisements"))
+        total = c.fetchone()["cnt"]
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * per_page
+
+        c.execute(adapt_query("""
+            SELECT id, title, description, media_type, media_file_id, is_active, created_at,
+                   COALESCE(views_count, 0) as views, COALESCE(sent_count, 0) as sent
+            FROM advertisements 
+            ORDER BY id DESC LIMIT ? OFFSET ?
+        """), (per_page, offset))
+        ads = c.fetchall()
+
+        if not ads:
+            text = (
+                "╭────────────────────────╮\n"
+                "   📋  <b>REKLAMALAR RO'YXATI</b>\n"
+                "╰────────────────────────╯\n\n"
+                "Hozircha tizimda birorta ham reklama yoki e'lon mavjud emas.\n\n"
+                "<i>Yangi reklama yaratish uchun «🚀 Yangi Reklama yaratish» tugmasini bosing!</i>"
+            )
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "🚀 Yangi Reklama yaratish", "callback_data": "ad_hub_new"}],
+                    [{"text": "🔙 Reklamalar markaziga qaytish", "callback_data": "ad_hub_main"}]
+                ]
+            }
+            return text, kb
+
+        text = (
+            "╭────────────────────────╮\n"
+            "   📋  <b>REKLAMA VA E'LONLAR BAZASI</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"Jami e'lonlar: <b>{total} ta</b> | Sahifa: <b>{page}/{total_pages}</b>\n\n"
+        )
+        
+        type_icons = {
+            "photo": "📸 Surat",
+            "video": "🎥 Video",
+            "document": "📁 Fayl",
+            "file": "📁 Fayl",
+            "text": "📝 Matn"
+        }
+
+        kb_rows = []
+        for a in ads:
+            ad_id = a["id"]
+            is_act = bool(a["is_active"])
+            status_ico = "🟢 Faol" if is_act else "🔴 Nofaol"
+            m_icon = type_icons.get(a.get("media_type", "text"), "📝 Matn")
+            c_date = str(a.get("created_at", ""))[:16]
+
+            text += (
+                f"🔹 <b>#{ad_id} — {a['title'][:32]}</b>\n"
+                f"   ├ 📂 Turi: {m_icon} | ⚙️ Holat: <b>{status_ico}</b>\n"
+                f"   ├ 👥 Yuborilgan: {a.get('sent', 0)} ta | 📅 {c_date}\n\n"
+            )
+
+            toggle_txt = "🔴 Nofaol qilish" if is_act else "🟢 Faollashtirish"
+            kb_rows.append([
+                {"text": f"👁 #{ad_id} Ko'rish", "callback_data": f"ad_view_{ad_id}"},
+                {"text": f"{toggle_txt}", "callback_data": f"ad_toggle_{ad_id}"},
+                {"text": "🗑 O'chirish", "callback_data": f"ad_del_{ad_id}"}
+            ])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append({"text": "⬅️ Oldingi", "callback_data": f"ad_hub_list_{page-1}"})
+        if page < total_pages:
+            nav_row.append({"text": "Keyingi ➡️", "callback_data": f"ad_hub_list_{page+1}"})
+        if nav_row:
+            kb_rows.append(nav_row)
+
+        kb_rows.append([{"text": "🚀 Yangi Reklama yaratish", "callback_data": "ad_hub_new"}])
+        kb_rows.append([{"text": "🔙 Reklamalar markaziga qaytish", "callback_data": "ad_hub_main"}])
+
+        return text, {"inline_keyboard": kb_rows}
+    finally:
+        conn.close()
+
+
+def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
+    """
+    To'liq audit va tahliliy hisobot bilan barcha foydalanuvchilarga reklama tarqatish.
+    Surat, video, fayl yoki matnni ikkala bot obunachilariga xavfsiz va to'lqinli yuboradi.
+    """
+    start_time = time.time()
+    now_dt = get_now_tashkent()
+    start_str = now_dt.strftime("%H:%M:%S")
+    start_date = now_dt.strftime("%Y-%m-%d")
+
+    m_type = draft.get("type", "text")
+    file_id = draft.get("file_id")
+    text_content = draft.get("text", "")
+    ad_title = draft.get("title") or (text_content.split("\n")[0][:50] if text_content else "E'lon")
+
+    conn = get_db()
+    c = dict_cursor(conn)
+    chorva_users = set()
+    prayer_users = set()
+    try:
+        c.execute(adapt_query("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"))
+        for r in c.fetchall():
+            if r["telegram_id"]: chorva_users.add(int(r["telegram_id"]))
+
+        c.execute(adapt_query("SELECT telegram_id FROM prayer_users WHERE telegram_id IS NOT NULL"))
+        for r in c.fetchall():
+            if r["telegram_id"]: prayer_users.add(int(r["telegram_id"]))
+    finally:
+        conn.close()
+
+    all_recipients = prayer_users | chorva_users
+    total_recipients = len(all_recipients)
+
+    if total_recipients == 0:
+        send_telegram_msg(admin_chat_id, "⚠️ Baza bo'sh! Birorta ham qabul qiluvchi Telegram foydalanuvchi topilmadi.", bot_token=bot_token)
+        return
+
+    send_telegram_msg(
+        admin_chat_id, 
+        f"⏳ <b>Reklama tarqatish boshlandi...</b>\n"
+        f"👥 Jami qamrov: <b>{total_recipients} ta</b> foydalanuvchi.\n"
+        f"<i>Tugashi bilan to'liq tahliliy hisobot shu yerga yuboriladi.</i>", 
+        bot_token=bot_token
+    )
+
+    success_count = 0
+    blocked_count = 0
+    failed_count = 0
+    prayer_sent = 0
+    chorva_sent = 0
+
+    BATCH_SIZE = 25
+    batch_counter = 0
+
+    # A) Asl Namoz boti a'zolariga jo'natish
+    if PRAYER_BOT_TOKEN:
+        for tid in prayer_users:
+            ok, is_bl, err = send_telegram_media_generic(tid, m_type, file_id, text_content, bot_token=PRAYER_BOT_TOKEN)
+            if ok:
+                success_count += 1
+                prayer_sent += 1
+            elif is_bl:
+                blocked_count += 1
+            else:
+                failed_count += 1
+            batch_counter += 1
+            if batch_counter % BATCH_SIZE == 0:
+                time.sleep(1.0)
+            else:
+                time.sleep(0.04)
+
+    # B) AI Chorva boti a'zolariga
+    remaining_chorva = chorva_users - prayer_users
+    if CHORVA_BOT_TOKEN:
+        for tid in remaining_chorva:
+            ok, is_bl, err = send_telegram_media_generic(tid, m_type, file_id, text_content, bot_token=CHORVA_BOT_TOKEN)
+            if ok:
+                success_count += 1
+                chorva_sent += 1
+            elif is_bl:
+                blocked_count += 1
+            else:
+                failed_count += 1
+            batch_counter += 1
+            if batch_counter % BATCH_SIZE == 0:
+                time.sleep(1.0)
+            else:
+                time.sleep(0.04)
+
+    # Mobil ilova uchun ma'lumotlar bazasiga saqlash
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(adapt_query("""
+            INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count)
+            VALUES (?, ?, 'broadcast', ?, ?, ?, ?)
+        """), (ad_title, text_content, True if IS_POSTGRES else 1, m_type, file_id, success_count))
+        conn.commit()
+        conn.close()
+    except Exception as e_save:
+        print(f"[SAVE AD RECORD ERR]: {e_save}")
+
+    end_time = time.time()
+    now_end_dt = get_now_tashkent()
+    end_str = now_end_dt.strftime("%H:%M:%S")
+    duration_sec = round(end_time - start_time, 1)
+    speed_per_sec = round(total_recipients / max(duration_sec, 0.1), 1)
+    success_percent = round((success_count / total_recipients) * 100, 1) if total_recipients > 0 else 0
+
+    type_names = {
+        "photo": "📸 Rasm / Suratli reklama",
+        "video": "🎥 Video rolik",
+        "document": "📁 Fayl / Hujjat",
+        "file": "📁 Fayl / Hujjat",
+        "text": "📝 Matnli e'lon"
+    }
+
+    report_text = (
+        "╭────────────────────────╮\n"
+        "   📊  <b>REKLAMA TARQATISH HISOBOTI</b>\n"
+        "╰────────────────────────╯\n\n"
+        f"🏷 <b>E'lon:</b> <i>«{ad_title}»</i>\n"
+        f"📂 <b>Format:</b> <b>{type_names.get(m_type, '📝 Matnli e\'lon')}</b>\n"
+        f"📅 <b>Sana:</b> {start_date} | 🕒 <b>Vaqt:</b> {start_str} ➔ {end_str}\n\n"
+        "📈 <b>NATIJALAR TAHLILI:</b>\n"
+        f" • 👥 <b>Umumiy auditoriya:</b> <b>{total_recipients} ta</b>\n"
+        f" • ✅ <b>Muvaffaqiyatli yetkazildi:</b> <b>{success_count} ta ({success_percent}%)</b>\n"
+        f" • 🚫 <b>Botni bloklaganlar:</b> <b>{blocked_count} ta</b> <i>(Yetib bormadi)</i>\n"
+        f" • ⚠️ <b>Boshqa uzilishlar:</b> <b>{failed_count} ta</b>\n\n"
+        "🤖 <b>MANBALAR KESIMIDA:</b>\n"
+        f" • 🕌 <b>Asl Namoz Boti:</b> {prayer_sent} ta obunachiga\n"
+        f" • 🐂 <b>AI Chorva Boti:</b> {chorva_sent} ta obunachiga\n"
+        f" • 📲 <b>AI Chorva Ilovasi:</b> Bosh sahifaga joylandi ✅\n\n"
+        "⏱ <b>VAQT KO'RSATKICHI:</b>\n"
+        f" • ⏳ <b>Sarflangan vaqt:</b> <b>{duration_sec} soniya</b>\n"
+        f" • ⚡️ <b>O'rtacha tezlik:</b> <b>~{speed_per_sec} ta xabar/soniya</b>\n\n"
+        "🛡 <i>Ushbu hisobot tizim audit jurnalida saqlandi.</i>"
+    )
+
+    set_system_setting("last_ad_report", report_text)
+    set_system_setting("last_ad_time", f"{start_date} {end_str}")
+
+    kb_done = {
+        "inline_keyboard": [
+            [{"text": "📋 Barcha reklamalar ro'yxati", "callback_data": "ad_hub_list_1"}],
+            [{"text": "🚀 Yangi reklama yaratish", "callback_data": "ad_hub_new"}],
+            [{"text": "🔙 Reklamalar markaziga qaytish", "callback_data": "ad_hub_main"}]
+        ]
+    }
+    send_telegram_msg(admin_chat_id, report_text, reply_markup=kb_done, bot_token=bot_token)
+
+
 def get_admin_panel_menu(is_prayer_bot=False):
     """Faqat Admin uchun maxsus boshqaruv paneli menyusi"""
     if is_prayer_bot:
         kb = [
-            [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "📊 Baza statistikasi"}],
+            [{"text": "📣 Reklama va E'lonlar markazi"}, {"text": "📊 Baza statistikasi"}],
             [{"text": "🔔 Azon eslatmasini sinash"}, {"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     else:
@@ -1608,7 +1958,7 @@ def get_admin_panel_menu(is_prayer_bot=False):
             [{"text": auth_btn_text}, {"text": "🐙 GitHub Zaxira (Kunlik)"}],
             [{"text": "💾 Bazani yuklab olish"}, {"text": "📥 Bazani tiklash"}],
             [{"text": "📦 Yangi APK yuklash"}, {"text": "📢 Versiya yangiligini e'lon qilish"}],
-            [{"text": "📣 Reklama / E'lon yuborish"}, {"text": "🔙 Asosiy menyuga qaytish"}],
+            [{"text": "📣 Reklama va E'lonlar markazi"}, {"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     return {
         "keyboard": kb,
@@ -1798,11 +2148,16 @@ def export_database_json():
 
 def import_database_json(data):
     """JSON zaxira faylidan ma'lumotlarni bazaga yuklash"""
+    if not isinstance(data, dict):
+        return {}
+    # Agar backup_payload ichidagi "data" o'rami bo'lsa
+    actual_data = data.get("data") if ("data" in data and isinstance(data["data"], dict)) else data
+
     conn = get_db()
     c = conn.cursor()
     imported_counts = {}
     try:
-        for table, rows in data.items():
+        for table, rows in actual_data.items():
             if not isinstance(rows, list) or not rows:
                 continue
             cnt = 0
@@ -1826,6 +2181,60 @@ def import_database_json(data):
         return imported_counts
     finally:
         conn.close()
+
+
+def auto_restore_database_from_github():
+    """
+    Render server har safar qayta tushganda yoki start bo'lganda 
+    GitHub dagi oxirgi zaxiradan barcha ma'lumotlarni avtomatik yuklab olib tiklaydi.
+    Natijada Renderning bepul tarifi bazani o'chirib yuborsa ham, tizim o'z-o'zini avtomatik tiklaydi!
+    """
+    print("[AUTO RESTORE] GitHub dan avtomatik baza zaxirasini yuklash boshlandi...")
+    try:
+        # 1. Avval mahalliy papkadagi database_backup/chorva_database_backup.json ni tekshiramiz
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(base_dir, "..", "database_backup", "chorva_database_backup.json"),
+            os.path.join(base_dir, "database_backup", "chorva_database_backup.json"),
+            os.path.join(base_dir, "chorva_database_backup.json")
+        ]
+        json_data = None
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        json_data = json.load(f)
+                    print(f"[AUTO RESTORE] Diskdagi zaxira fayli topildi: {p}")
+                    break
+                except Exception:
+                    pass
+
+        # 2. Agar diskda topilmasa, to'g'ridan-to'g'ri GitHub RAW havolasidan yuklab olamiz (Token shart emas!)
+        if not json_data:
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/database_backup/chorva_database_backup.json"
+            try:
+                r = requests.get(raw_url, timeout=12)
+                if r.status_code == 200:
+                    json_data = r.json()
+                    print(f"[AUTO RESTORE] GitHub RAW ({raw_url}) dan zaxira muvaffaqiyatli yuklab olindi!")
+                else:
+                    print(f"[AUTO RESTORE] GitHub RAW javob kodi: {r.status_code}")
+            except Exception as e_gh:
+                print(f"[AUTO RESTORE GH ERR]: {e_gh}")
+
+        # 3. Agar ma'lumot topilgan bo'lsa, bazaga import qilamiz!
+        if json_data:
+            counts = import_database_json(json_data)
+            u_c = counts.get("users", 0)
+            b_c = counts.get("bulls", 0)
+            print(f"[AUTO RESTORE SUCCESS]: Baza avtomatik tiklandi! Fermerlar: {u_c} ta, Jonivorlar: {b_c} ta, Jadvallar: {len(counts)} ta!")
+            return True, counts
+        else:
+            print("[AUTO RESTORE]: Zaxira fayli topilmadi yoki bo'sh.")
+            return False, "Zaxira topilmadi"
+    except Exception as ex:
+        print(f"[AUTO RESTORE EXCEPTION]: {ex}")
+        return False, str(ex)
 
 
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "fazliddin3388/aichorva-cloud")
@@ -2250,6 +2659,240 @@ def handle_telegram_update(update, bot_token=None):
             )
             cancel_kb = {"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}
             send_telegram_msg(chat_id, c_prompt, reply_markup=cancel_kb, bot_token=active_token)
+            return
+
+        # ─── REKLAMALAR VA E'LONLAR MARKAZI (CALLBACKS) ───
+        if cb_data == "ad_hub_main" and is_admin:
+            answer_callback_query(cb_id, bot_token=active_token)
+            msg_hub = (
+                "╭────────────────────────╮\n"
+                "   📢  <b>REKLAMA VA E'LONLAR MARKAZI</b>\n"
+                "╰────────────────────────╯\n\n"
+                "Ushbu bo'lim orqali siz:\n"
+                " • 📸 <b>Surat, 🎥 Video, 📁 Fayl</b> yoki 📝 <b>Matnli</b> reklamalarni barcha Telegram botlari va Mobil ilovaga bir vaqtda tarqatishingiz;\n"
+                " • 📋 Mavjud e'lonlarni ko'rish, yoqish/o'chirish va tahrirlashingiz;\n"
+                " • 📊 Tarqatish tezligi, yetib borgan va yetib bormaganlar soni bo'yicha to'liq hisobotni ko'rishingiz mumkin!\n\n"
+                "👇 <i>Kerakli amalni tanlang:</i>"
+            )
+            edit_telegram_msg(chat_id, msg_id, msg_hub, get_ads_hub_keyboard(), bot_token=active_token)
+            return
+
+        if cb_data == "ad_hub_new" and is_admin:
+            ADMIN_STATE[chat_id] = "waiting_broadcast_content"
+            answer_callback_query(cb_id, bot_token=active_token)
+            instr_new = (
+                "╭────────────────────────╮\n"
+                "   🚀  <b>YANGI REKLAMA / E'LON YARATISH</b>\n"
+                "╰────────────────────────╯\n\n"
+                "Menga reklama materialini yuboring:\n\n"
+                " • 📸 <b>Surat (Photo):</b> Tagiga tavsif/matn (caption) yozib yuboring;\n"
+                " • 🎥 <b>Video rolik:</b> Tagiga tavsif yozib yuboring;\n"
+                " • 📁 <b>Fayl / Hujjat:</b> PDF, Word, narxlar ro'yxati yoki katalog;\n"
+                " • 📝 <b>Oddiy Matn:</b> E'lon matnining o'zi.\n\n"
+                "💡 <i>Siz yuborgan material avval o'zingizga ko'rsatiladi va tasdiqlaganingizdan keyingina barcha foydalanuvchilarga tarqatiladi!</i>\n\n"
+                "<i>Bekor qilish uchun pastdagi «❌ Bekor qilish» tugmasini bosing.</i>"
+            )
+            cancel_kb = {"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}
+            send_telegram_msg(chat_id, instr_new, reply_markup=cancel_kb, bot_token=active_token)
+            return
+
+        if cb_data.startswith("ad_hub_list_") and is_admin:
+            page_num = int(cb_data.replace("ad_hub_list_", "") or "1")
+            answer_callback_query(cb_id, bot_token=active_token)
+            t_ads, kb_ads = format_advertisements_list(page=page_num)
+            edit_telegram_msg(chat_id, msg_id, t_ads, kb_ads, bot_token=active_token)
+            return
+
+        if cb_data == "ad_hub_report" and is_admin:
+            answer_callback_query(cb_id, bot_token=active_token)
+            rep_text = get_system_setting("last_ad_report")
+            if not rep_text:
+                rep_text = (
+                    "╭────────────────────────╮\n"
+                    "   📊  <b>OXIRGI HISOBOT MAVJUD EMAS</b>\n"
+                    "╰────────────────────────╯\n\n"
+                    "Hali hech qanday reklama tarqatilmagan.\n"
+                    "Yangi reklama tarqatilgach, bu yerda batafsil vaqt va qamrov statistikasi saqlanadi."
+                )
+            back_kb = {"inline_keyboard": [[{"text": "🔙 Reklamalar markaziga qaytish", "callback_data": "ad_hub_main"}]]}
+            edit_telegram_msg(chat_id, msg_id, rep_text, back_kb, bot_token=active_token)
+            return
+
+        if cb_data == "ad_hub_back_panel" and is_admin:
+            answer_callback_query(cb_id, bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "👑 <b>Admin boshqaruv paneliga qaytildi.</b>", reply_markup=None, bot_token=active_token)
+            send_telegram_msg(chat_id, "Quyidagi menyudan kerakli bo'limni tanlang:", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            return
+
+        if cb_data.startswith("ad_view_") and is_admin:
+            ad_id = int(cb_data.replace("ad_view_", ""))
+            answer_callback_query(cb_id, bot_token=active_token)
+            conn = get_db()
+            c = dict_cursor(conn)
+            try:
+                c.execute(adapt_query("SELECT * FROM advertisements WHERE id = ?"), (ad_id,))
+                ad_row = c.fetchone()
+            finally:
+                conn.close()
+
+            if not ad_row:
+                send_telegram_msg(chat_id, "⚠️ Reklama topilmadi.", bot_token=active_token)
+                return
+
+            m_t = ad_row.get("media_type") or "text"
+            m_fid = ad_row.get("media_file_id")
+            desc = ad_row.get("description") or ad_row.get("title") or ""
+            is_act = bool(ad_row.get("is_active"))
+            act_word = "🟢 Faol (Ilovada ko'rinadi)" if is_act else "🔴 Nofaol (Yashiringan)"
+            sent_cnt = ad_row.get("sent_count") or 0
+            created_s = str(ad_row.get("created_at") or "")[:16]
+
+            caption_full = (
+                f"╭────────────────────────╮\n"
+                f"   👁  <b>REKLAMA #{ad_id} TAFSILOTLARI</b>\n"
+                f"╰────────────────────────╯\n\n"
+                f"📌 <b>Sarlavha:</b> {ad_row.get('title')}\n"
+                f"⚙️ <b>Holat:</b> <b>{act_word}</b>\n"
+                f"👥 <b>Yuborilgan foydalanuvchilar:</b> {sent_cnt} ta\n"
+                f"📅 <b>Yaratilgan sana:</b> {created_s}\n\n"
+                f"📝 <b>Matn / Tavsif:</b>\n{desc}"
+            )
+
+            toggle_act = "🔴 Nofaol qilish" if is_act else "🟢 Faollashtirish"
+            v_kb = {
+                "inline_keyboard": [
+                    [{"text": f"{toggle_act}", "callback_data": f"ad_toggle_{ad_id}"}],
+                    [{"text": "✏️ Matnni tahrirlash", "callback_data": f"ad_edit_{ad_id}"}],
+                    [{"text": "🚀 Qaytadan barchaga yuborish", "callback_data": f"ad_resend_{ad_id}"}],
+                    [{"text": "🗑 O'chirish", "callback_data": f"ad_del_{ad_id}"}],
+                    [{"text": "⬅️ Ro'yxatga qaytish", "callback_data": "ad_hub_list_1"}]
+                ]
+            }
+
+            if m_t == "photo" and m_fid:
+                send_telegram_photo(chat_id, m_fid, caption=caption_full, reply_markup=v_kb, bot_token=active_token)
+            elif m_t == "video" and m_fid:
+                send_telegram_video(chat_id, m_fid, caption=caption_full, reply_markup=v_kb, bot_token=active_token)
+            elif m_t in ("document", "file") and m_fid:
+                send_telegram_document(chat_id, m_fid, caption=caption_full, reply_markup=v_kb, bot_token=active_token)
+            else:
+                send_telegram_msg(chat_id, caption_full, reply_markup=v_kb, bot_token=active_token)
+            return
+
+        if cb_data.startswith("ad_toggle_") and is_admin:
+            ad_id = int(cb_data.replace("ad_toggle_", ""))
+            conn = get_db()
+            c = conn.cursor()
+            try:
+                c.execute(adapt_query("UPDATE advertisements SET is_active = CASE WHEN is_active = ? THEN ? ELSE ? END WHERE id = ?"),
+                          (True if IS_POSTGRES else 1, False if IS_POSTGRES else 0, True if IS_POSTGRES else 1, ad_id))
+                conn.commit()
+            finally:
+                conn.close()
+            answer_callback_query(cb_id, "Holat muvaffaqiyatli o'zgartirildi!", show_alert=True, bot_token=active_token)
+            t_ads, kb_ads = format_advertisements_list(page=1)
+            edit_telegram_msg(chat_id, msg_id, t_ads, kb_ads, bot_token=active_token)
+            return
+
+        if cb_data.startswith("ad_del_") and is_admin:
+            ad_id = int(cb_data.replace("ad_del_", ""))
+            conn = get_db()
+            c = conn.cursor()
+            try:
+                c.execute(adapt_query("DELETE FROM advertisements WHERE id = ?"), (ad_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            answer_callback_query(cb_id, f"#{ad_id} reklama o'chirildi!", show_alert=True, bot_token=active_token)
+            t_ads, kb_ads = format_advertisements_list(page=1)
+            edit_telegram_msg(chat_id, msg_id, t_ads, kb_ads, bot_token=active_token)
+            return
+
+        if cb_data.startswith("ad_edit_") and is_admin:
+            ad_id = int(cb_data.replace("ad_edit_", ""))
+            ADMIN_STATE[chat_id] = f"waiting_edit_ad_{ad_id}"
+            answer_callback_query(cb_id, bot_token=active_token)
+            prompt_edit = (
+                f"╭────────────────────────╮\n"
+                f"   ✏️  <b>REKLAMA #{ad_id} MATNINI TAHRIRLASH</b>\n"
+                f"╰────────────────────────╯\n\n"
+                f"Ushbu reklama uchun yangi matnni yozib yuboring:\n\n"
+                f"<i>Bekor qilish uchun pastdagi «❌ Bekor qilish» tugmasini bosing.</i>"
+            )
+            cancel_kb = {"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}
+            send_telegram_msg(chat_id, prompt_edit, reply_markup=cancel_kb, bot_token=active_token)
+            return
+
+        if cb_data.startswith("ad_resend_") and is_admin:
+            ad_id = int(cb_data.replace("ad_resend_", ""))
+            conn = get_db()
+            c = dict_cursor(conn)
+            try:
+                c.execute(adapt_query("SELECT * FROM advertisements WHERE id = ?"), (ad_id,))
+                ad_row = c.fetchone()
+            finally:
+                conn.close()
+
+            if not ad_row:
+                answer_callback_query(cb_id, "E'lon topilmadi!", show_alert=True, bot_token=active_token)
+                return
+
+            draft = {
+                "type": ad_row.get("media_type") or "text",
+                "file_id": ad_row.get("media_file_id"),
+                "text": ad_row.get("description") or ad_row.get("title") or "",
+                "title": ad_row.get("title")
+            }
+            answer_callback_query(cb_id, "Qaytadan tarqatish boshlanmoqda...", bot_token=active_token)
+            threading.Thread(target=execute_broadcast_campaign, args=(chat_id, draft, active_token), daemon=True).start()
+            return
+
+        if cb_data == "confirm_send_broadcast" and is_admin:
+            draft = PENDING_BROADCASTS.pop(chat_id, None)
+            ADMIN_STATE.pop(chat_id, None)
+            if not draft:
+                answer_callback_query(cb_id, "Xabar qoralamasi muddati o'tgan yoki topilmadi.", show_alert=True, bot_token=active_token)
+                return
+
+            answer_callback_query(cb_id, "Tarqatish boshlandi!", bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "🚀 <b>Reklama barcha foydalanuvchilarga tarqatilmoqda...</b>\n<i>Kuting, hisobot tez orada tayyor bo'ladi.</i>", reply_markup=None, bot_token=active_token)
+            threading.Thread(target=execute_broadcast_campaign, args=(chat_id, draft, active_token), daemon=True).start()
+            return
+
+        if cb_data == "save_app_only_broadcast" and is_admin:
+            draft = PENDING_BROADCASTS.pop(chat_id, None)
+            ADMIN_STATE.pop(chat_id, None)
+            if not draft:
+                answer_callback_query(cb_id, "Qoralama topilmadi.", show_alert=True, bot_token=active_token)
+                return
+
+            m_t = draft.get("type", "text")
+            f_id = draft.get("file_id")
+            txt = draft.get("text", "")
+            title = draft.get("title") or (txt.split("\n")[0][:50] if txt else "E'lon")
+
+            conn = get_db()
+            c = conn.cursor()
+            try:
+                c.execute(adapt_query("""
+                    INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count)
+                    VALUES (?, ?, 'broadcast', ?, ?, ?, 0)
+                """), (title, txt, True if IS_POSTGRES else 1, m_t, f_id))
+                conn.commit()
+            finally:
+                conn.close()
+
+            answer_callback_query(cb_id, "Faqat ilovaga saqlandi!", show_alert=True, bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "✅ <b>E'lon faqat AI Chorva mobil ilovasi uchun muvaffaqiyatli saqlandi!</b>", reply_markup=None, bot_token=active_token)
+            send_telegram_msg(chat_id, "Boshqaruv menyusi:", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            return
+
+        if cb_data == "cancel_broadcast_draft" and is_admin:
+            PENDING_BROADCASTS.pop(chat_id, None)
+            ADMIN_STATE.pop(chat_id, None)
+            answer_callback_query(cb_id, "Bekor qilindi", bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "❌ <i>Reklama qoralamasi bekor qilindi.</i>", reply_markup=None, bot_token=active_token)
+            send_telegram_msg(chat_id, "Boshqaruv menyusi:", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
             return
 
     # 2. Xabar (Message) kelganda
@@ -2733,87 +3376,130 @@ def handle_telegram_update(update, bot_token=None):
             return
 
 
-    # 1. Agar admin reklama/e'lon yuborayotgan bo'lsa
-    if is_admin and ADMIN_STATE.get(chat_id) == "waiting_broadcast":
+    # 0.9. Reklama matnini tahrirlash holati
+    if is_admin and str(ADMIN_STATE.get(chat_id)).startswith("waiting_edit_ad_"):
+        ad_id = int(ADMIN_STATE[chat_id].replace("waiting_edit_ad_", ""))
         ADMIN_STATE.pop(chat_id, None)
-        ad_text = text or msg.get("caption") or ""
-        if not ad_text:
-            send_telegram_msg(chat_id, "Xabar matni bo'sh bo'lishi mumkin emas.", reply_markup=get_telegram_main_menu(True, is_prayer_bot), bot_token=active_token)
+        new_text = (text or msg.get("caption") or "").strip()
+        if not new_text or new_text in ("❌ Bekor qilish", "/cancel", "Bekor qilish"):
+            send_telegram_msg(chat_id, "Tahrirlash bekor qilindi.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
             return
 
-        # 1.1. Mobil ilova uchun e'lonlar bazasiga saqlaymiz
+        first_title = new_text.split("\n")[0][:50]
         conn = get_db()
         c = conn.cursor()
-        first_line = ad_text.split("\n")[0][:60]
         try:
-            c.execute(adapt_query("""
-                INSERT INTO advertisements (title, description, category, is_active)
-                VALUES (?, ?, 'broadcast', ?)
-            """), (first_line, ad_text, True if IS_POSTGRES else 1))
+            c.execute(adapt_query("UPDATE advertisements SET title = ?, description = ? WHERE id = ?"), (first_title, new_text, ad_id))
             conn.commit()
-        except Exception as e:
-            print(f"[SAVE AD ERR]: {e}")
-
-        # 1.2. Barcha Telegram foydalanuvchilariga tarqatamiz (Ikkala bot a'zolariga o'z botlaridan jo'natish)
-        chorva_recipients = set()
-        prayer_recipients = set()
-        try:
-            c_dict = dict_cursor(conn)
-            c_dict.execute(adapt_query("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"))
-            for r in c_dict.fetchall():
-                if r["telegram_id"]: chorva_recipients.add(r["telegram_id"])
-
-            c_dict.execute(adapt_query("SELECT telegram_id FROM prayer_users WHERE telegram_id IS NOT NULL"))
-            for r in c_dict.fetchall():
-                if r["telegram_id"]: prayer_recipients.add(r["telegram_id"])
         finally:
             conn.close()
 
-        sent_count = 0
-        broadcast_msg = f"📢 <b>RASMIY E'LON:</b>\n\n{ad_text}"
-
-        # 1. Asl Namoz boti a'zolariga
-        if PRAYER_BOT_TOKEN:
-            for rid in prayer_recipients:
-                try:
-                    send_telegram_msg(rid, broadcast_msg, bot_token=PRAYER_BOT_TOKEN)
-                    sent_count += 1
-                    time.sleep(0.04)
-                except Exception:
-                    pass
-
-        # 2. AI Chorva boti a'zolariga
-        if CHORVA_BOT_TOKEN:
-            for rid in (chorva_recipients - prayer_recipients):
-                try:
-                    send_telegram_msg(rid, broadcast_msg, bot_token=CHORVA_BOT_TOKEN)
-                    sent_count += 1
-                    time.sleep(0.04)
-                except Exception:
-                    pass
-
-        report = (
-            f"✅ <b>E'lon / Reklama muvaffaqiyatli tarqatildi!</b>\n\n"
-            f"👥 Telegram orqali yetkazildi: <b>{sent_count} ta</b> foydalanuvchiga\n"
-            f"📱 <b>AI Chorva</b> mobil ilovasiga ham yangi e'lon sifatida joylandi!"
-        )
-        send_telegram_msg(chat_id, report, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        send_telegram_msg(chat_id, f"✅ <b>Reklama #{ad_id} matni muvaffaqiyatli yangilandi!</b>", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        t_ads, kb_ads = format_advertisements_list(page=1)
+        send_telegram_msg(chat_id, t_ads, reply_markup=kb_ads, bot_token=active_token)
         return
 
-    # 2. Admin reklama buyrug'i
-    if is_admin and text in ("📣 Reklama / E'lon yuborish", "📣 Reklama yuborish", "/reklama", "/elon", "/broadcast"):
-        ADMIN_STATE[chat_id] = "waiting_broadcast"
-        instr = (
+    # 1. Admin yangi reklama (Matn, Surat, Video yoki Fayl) yuborganida
+    if is_admin and ADMIN_STATE.get(chat_id) in ("waiting_broadcast", "waiting_broadcast_content"):
+        # A) Bekor qilish
+        if text in ("❌ Bekor qilish", "/cancel", "Bekor qilish", "/bekor"):
+            ADMIN_STATE.pop(chat_id, None)
+            PENDING_BROADCASTS.pop(chat_id, None)
+            send_telegram_msg(chat_id, "Reklama yaratish bekor qilindi.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+            return
+
+        # B) Xabar turini tahlil qilish (Surat, Video, Fayl yoki Matn)
+        m_type = "text"
+        m_fid = None
+        f_name_doc = ""
+        caption_txt = (msg.get("caption") or text or "").strip()
+
+        if msg.get("photo"):
+            m_type = "photo"
+            m_fid = msg["photo"][-1]["file_id"]
+        elif msg.get("video"):
+            m_type = "video"
+            m_fid = msg["video"]["file_id"]
+        elif msg.get("document"):
+            m_type = "document"
+            m_fid = msg["document"]["file_id"]
+            f_name_doc = msg["document"].get("file_name") or "Hujjat"
+        elif text:
+            m_type = "text"
+            caption_txt = text
+        else:
+            send_telegram_msg(chat_id, "⚠️ Xabar matni yoki media fayl bo'sh bo'lishi mumkin emas. Qaytadan yuboring:", bot_token=active_token)
+            return
+
+        ad_title = caption_txt.split("\n")[0][:50] if caption_txt else (f_name_doc or "Yangi e'lon")
+
+        # Qoralamani saqlaymiz
+        draft = {
+            "type": m_type,
+            "file_id": m_fid,
+            "file_name": f_name_doc,
+            "text": caption_txt,
+            "title": ad_title
+        }
+        PENDING_BROADCASTS[chat_id] = draft
+        ADMIN_STATE.pop(chat_id, None)
+
+        # Qabul qiluvchilar umumiy sonini aniqlash
+        conn = get_db()
+        c = dict_cursor(conn)
+        total_recipients = 0
+        try:
+            c.execute(adapt_query("SELECT COUNT(DISTINCT telegram_id) as cnt FROM (SELECT telegram_id FROM users UNION SELECT telegram_id FROM prayer_users)"))
+            row_cnt = c.fetchone()
+            total_recipients = row_cnt["cnt"] if row_cnt else 0
+        finally:
+            conn.close()
+
+        type_names = {
+            "photo": "📸 Suratli reklama",
+            "video": "🎥 Video rolik",
+            "document": "📁 Fayl / Hujjat",
+            "text": "📝 Matnli e'lon"
+        }
+
+        # 1. Avval prevyu sifatida xabarning o'zini adminning o'ziga yuboramiz
+        send_telegram_msg(chat_id, "👀 <b>XABARNING ASL KO'RINISHI (PREVIEW):</b>", bot_token=active_token)
+        send_telegram_media_generic(chat_id, m_type, m_fid, caption_txt, bot_token=active_token)
+
+        # 2. Keyin boshqaruv va tasdiqlash tugmalarini beramiz
+        preview_prompt = (
             "╭────────────────────────╮\n"
-            "   📢  <b>REKLAMA VA E'LON TARQATISH</b>\n"
+            "   👁  <b>REKLAMA TAYYOR BO'LDI!</b>\n"
             "╰────────────────────────╯\n\n"
-            "Foydalanuvchilarga yubormoqchi bo'lgan e'lon yoki reklama matnini kiriting.\n\n"
-            "✨ <b>Xabar qayerlarga yetkaziladi:</b>\n"
-            " ├ 1. Barcha Namoz boti va AI Chorva Telegram obunachilariga DARHOL boradi;\n"
-            " └ 2. AI Chorva mobil ilovasi bosh sahifasida qulay e'lon kartochkasi bo'lib chiqadi!\n\n"
-            "<i>Bekor qilish uchun: «❌ Bekor qilish» tugmasini bosing.</i>"
+            f"📌 <b>Format:</b> <b>{type_names.get(m_type, '📝 Matn')}</b>\n"
+            f"👥 <b>Qamrov:</b> <b>{total_recipients} ta</b> faol foydalanuvchi\n\n"
+            "Yuqoridagi xabar barcha Telegram a'zolariga to'liq yetkaziladi va "
+            "AI Chorva mobil ilovasida ham e'lon sifatida saqlanadi.\n\n"
+            "👇 <i>Tarqatishni tasdiqlaysizmi?</i>"
         )
-        send_telegram_msg(chat_id, instr, reply_markup={"keyboard": [[{"text": "❌ Bekor qilish"}]], "resize_keyboard": True}, bot_token=active_token)
+        confirm_kb = {
+            "inline_keyboard": [
+                [{"text": "🚀 Ha, barcha foydalanuvchilarga tarqatish", "callback_data": "confirm_send_broadcast"}],
+                [{"text": "📱 Faqat mobil ilovaga saqlash (Botlarga yubormasdan)", "callback_data": "save_app_only_broadcast"}],
+                [{"text": "❌ Bekor qilish", "callback_data": "cancel_broadcast_draft"}]
+            ]
+        }
+        send_telegram_msg(chat_id, preview_prompt, reply_markup=confirm_kb, bot_token=active_token)
+        return
+
+    # 2. Reklama va E'lonlar Markazi bosh menyusi
+    if is_admin and text in ("📣 Reklama va E'lonlar markazi", "📣 Reklama / E'lon yuborish", "📣 Reklama yuborish", "/reklama", "/elon", "/broadcast", "/ads"):
+        hub_text = (
+            "╭────────────────────────╮\n"
+            "   📢  <b>REKLAMA VA E'LONLAR MARKAZI</b>\n"
+            "╰────────────────────────╯\n\n"
+            "Ushbu markaz orqali siz:\n"
+            " • 📸 <b>Surat, 🎥 Video, 📁 Fayl</b> yoki 📝 <b>Matnli</b> reklamalarni barcha Telegram obunachilari va mobil ilovaga bir zumda tarqatishingiz;\n"
+            " • 📋 Mavjud barcha e'lonlarni boshqarish, yoqish/o'chirish va tahrirlashingiz;\n"
+            " • 📊 Nechta foydalanuvchiga borgani va ketgan vaqt bo'yicha to'liq hisobotni ko'rishingiz mumkin!\n\n"
+            "👇 <i>Kerakli bo'limni tanlang:</i>"
+        )
+        send_telegram_msg(chat_id, hub_text, reply_markup=get_ads_hub_keyboard(), bot_token=active_token)
         return
 
     # 3. Admin statistika buyrug'i
@@ -4514,14 +5200,21 @@ def reset_my_cloud_data():
 # 7. BILDIRISHNOMALAR (FCM PUSH) VA REKLAMA/E'LONLAR TIZIMI
 # ═════════════════════════════════════════════════════════════════════════════
 @app.route('/api/ads/active', methods=['GET'])
+@app.route('/api/app/advertisements', methods=['GET'])
 def get_active_ads():
     """Mobil ilovada ko'rsatiladigan faol reklama bannerlari va e'lonlar"""
     conn = get_db()
     c = dict_cursor(conn)
     try:
-        c.execute(adapt_query("SELECT id, title, image_url, link_url, description, category FROM advertisements WHERE is_active = ? ORDER BY id DESC LIMIT 10"), (True if IS_POSTGRES else 1,))
+        c.execute(adapt_query("""
+            SELECT id, title, image_url, link_url, description, category,
+                   COALESCE(media_type, 'text') as media_type, media_file_id, created_at
+            FROM advertisements 
+            WHERE is_active = ? 
+            ORDER BY id DESC LIMIT 15
+        """), (True if IS_POSTGRES else 1,))
         ads = [dict(r) for r in c.fetchall()]
-        return jsonify({"status": "success", "ads": ads})
+        return jsonify({"status": "success", "ads": ads, "total": len(ads)})
     finally:
         conn.close()
 
