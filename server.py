@@ -875,6 +875,107 @@ PRAYER_CITY_MAP = {
 
 PRAYER_CACHE = {}  # {region: {date: '27.09.2026', times: {...}}}
 ISLOMAPI_DOWN_UNTIL = 0
+USER_PRAYER_REGION = {}  # {user_id: region}
+
+
+def get_user_prayer_region(user_id):
+    """Foydalanuvchi yoki Admin tanlagan hududni barcha manbalardan (RAM -> prayer_users -> settings -> Toshkent) xatosiz olish"""
+    if not user_id:
+        return "Toshkent"
+    try:
+        uid = int(user_id)
+    except Exception:
+        uid = user_id
+
+    # 1. Tezkor xotira (RAM kesh)
+    if uid in USER_PRAYER_REGION and USER_PRAYER_REGION[uid]:
+        return USER_PRAYER_REGION[uid]
+    if str(uid) in USER_PRAYER_REGION and USER_PRAYER_REGION[str(uid)]:
+        return USER_PRAYER_REGION[str(uid)]
+
+    # 2. prayer_users ma'lumotlar bazasi jadvali
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(adapt_query("SELECT region FROM prayer_users WHERE telegram_id = ?"), (uid,))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            reg = str(row[0]).strip()
+            if reg:
+                USER_PRAYER_REGION[uid] = reg
+                USER_PRAYER_REGION[str(uid)] = reg
+                return reg
+    except Exception as e:
+        print(f"[GET REGION DB ERR]: {e}")
+
+    # 3. system_settings (zaxira sozlamalar)
+    try:
+        saved_reg = get_system_setting(f"user_region_{uid}", "")
+        if saved_reg:
+            USER_PRAYER_REGION[uid] = saved_reg
+            return saved_reg
+        if is_admin_user(uid):
+            adm_reg = get_system_setting("admin_prayer_region", "") or get_system_setting("namoz_region", "")
+            if adm_reg:
+                USER_PRAYER_REGION[uid] = adm_reg
+                return adm_reg
+    except Exception:
+        pass
+
+    return "Toshkent"
+
+
+def set_user_prayer_region(user_id, region, username="", full_name=""):
+    """Foydalanuvchi yoki Admin tanlagan hududni barcha darajalarda (RAM, prayer_users, system_settings) 100% kafolatli saqlash"""
+    if not user_id or not region:
+        return
+    reg = str(region).strip()
+    try:
+        uid = int(user_id)
+    except Exception:
+        uid = user_id
+
+    # 1. Tezkor xotira (RAM) - darhol kuchga kiradi
+    USER_PRAYER_REGION[uid] = reg
+    USER_PRAYER_REGION[str(uid)] = reg
+
+    # 2. Key-Value Sozlamalarga yozish (har doim xatosiz ishlaydi)
+    try:
+        set_system_setting(f"user_region_{uid}", reg)
+        if is_admin_user(uid):
+            set_system_setting("admin_prayer_region", reg)
+            set_system_setting("namoz_region", reg)
+    except Exception as e:
+        print(f"[SET REGION SETTING ERR]: {e}")
+
+    # 3. prayer_users jadvaliga yozish (SQLite va Postgres uchun to'g'ri parametrlarda)
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute(adapt_query("SELECT telegram_id, region FROM prayer_users WHERE telegram_id = ?"), (uid,))
+        row = c.fetchone()
+        if row:
+            c.execute(adapt_query("UPDATE prayer_users SET region = ?, username = COALESCE(NULLIF(?, ''), username), full_name = COALESCE(NULLIF(?, ''), full_name) WHERE telegram_id = ?"),
+                      (reg, username or "", full_name or "", uid))
+        else:
+            if IS_POSTGRES:
+                c.execute("""
+                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
+                    VALUES (%s, %s, %s, %s, TRUE)
+                """, (uid, username or "", full_name or "", reg))
+            else:
+                c.execute("""
+                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
+                    VALUES (?, ?, ?, ?, 1)
+                """, (uid, username or "", full_name or "", reg))
+        conn.commit()
+        print(f"[REGION SAVED OK] user_id={uid} -> '{reg}'")
+    except Exception as e:
+        print(f"[REGION SAVE DB ERR]: {e}")
+        traceback.print_exc()
+    finally:
+        conn.close()
 
 
 def fetch_prayer_times(region="Toshkent"):
@@ -2679,17 +2780,18 @@ def handle_telegram_update(update, bot_token=None):
         is_admin = is_admin_user(user_id, username=username, full_name=full_u_name)
 
         if cb_data == "test_azon_notif":
+            region = get_user_prayer_region(user_id)
             answer_callback_query(cb_id, "🔔 Test azon eslatmasi yuborildi!", bot_token=active_token)
             now_hm = get_now_tashkent().strftime("%H:%M")
             test_azon = (
                 "╭────────────────────────╮\n"
                 "   🔔  <b>AZON BILDIRISHNOMASI (TEST)</b>\n"
                 "╰────────────────────────╯\n\n"
-                f"📍 <b>Hudud:</b> Toshkent | 🕒 <b>Hozirgi vaqt:</b> {now_hm}\n\n"
+                f"📍 <b>Hudud:</b> {region} | 🕒 <b>Hozirgi vaqt:</b> {now_hm}\n\n"
                 "🕌 <b>Namoz vaqti kirdi.</b>\n"
                 "<i>«Albatta, namoz mo'minlarga vaqtida farz qilingandir.» (Niso, 103)</i>\n\n"
                 "✅ <b>Bildirishnoma tizimi 100% ideal ishlamoqda!</b>\n"
-                "Har kuni 5 mahal namoz vaqti kirganda aynan shunday eslatma avtomatik keladi."
+                f"Har kuni 5 mahal namoz vaqti kirganda aynan shunday eslatma avtomatik keladi ({region} vaqti bilan)."
             )
             send_telegram_msg(chat_id, test_azon, bot_token=active_token)
             return
@@ -2706,27 +2808,11 @@ def handle_telegram_update(update, bot_token=None):
             return
 
         if cb_data.startswith("pr_"):
-            region = cb_data.replace("pr_", "")
+            region = cb_data.replace("pr_", "").strip()
             answer_callback_query(cb_id, f"✅ {region} tanlandi!", bot_token=active_token)
 
-            # Bazaga foydalanuvchining hududini yozib qo'yamiz
-            conn = get_db()
-            c = conn.cursor()
-            try:
-                c.execute(adapt_query("""
-                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(telegram_id) DO UPDATE SET region = excluded.region
-                """ if IS_POSTGRES else """
-                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
-                    VALUES (?, ?, ?, ?, 1)
-                    ON CONFLICT(telegram_id) DO UPDATE SET region = excluded.region
-                """), (user_id, from_user.get("username", ""), from_user.get("first_name", ""), region, True if IS_POSTGRES else 1))
-                conn.commit()
-            except Exception as e:
-                print(f"[PRAYER USER SAVE ERR]: {e}")
-            finally:
-                conn.close()
+            # Foydalanuvchi/Admin tanlagan hududni barcha darajalarda (RAM, DB, Settings) 100% saqlaymiz
+            set_user_prayer_region(user_id, region, username=username, full_name=full_u_name)
 
             card_text = format_prayer_card_message(region)
             edit_telegram_msg(chat_id, msg_id, card_text, get_prayer_action_keyboard(region), bot_token=active_token)
@@ -2742,24 +2828,30 @@ def handle_telegram_update(update, bot_token=None):
             return
 
         if cb_data == "tgl_notif":
+            region = get_user_prayer_region(user_id)
             conn = get_db()
             c = conn.cursor()
             try:
                 c.execute(adapt_query("SELECT notifications FROM prayer_users WHERE telegram_id = ?"), (user_id,))
                 row = c.fetchone()
-                current_state = bool(row[0]) if row else True
+                current_state = bool(row[0]) if (row and row[0] is not None) else True
                 new_state = not current_state
-                c.execute(adapt_query("""
-                    INSERT INTO prayer_users (telegram_id, username, full_name, notifications)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(telegram_id) DO UPDATE SET notifications = excluded.notifications
-                """), (user_id, from_user.get("username", ""), from_user.get("first_name", ""), new_state if IS_POSTGRES else (1 if new_state else 0)))
+                if row:
+                    c.execute(adapt_query("UPDATE prayer_users SET notifications = ?, username = COALESCE(NULLIF(?, ''), username), full_name = COALESCE(NULLIF(?, ''), full_name) WHERE telegram_id = ?"),
+                              (new_state if IS_POSTGRES else (1 if new_state else 0), username or "", full_u_name or "", user_id))
+                else:
+                    if IS_POSTGRES:
+                        c.execute("INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications) VALUES (%s, %s, %s, %s, %s)",
+                                  (user_id, username or "", full_u_name or "", region, new_state))
+                    else:
+                        c.execute("INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications) VALUES (?, ?, ?, ?, ?)",
+                                  (user_id, username or "", full_u_name or "", region, 1 if new_state else 0))
                 conn.commit()
                 status_txt = "✅ Azon eslatmalari yoqildi!" if new_state else "❌ Azon eslatmalari o'chirildi!"
                 answer_callback_query(cb_id, status_txt, show_alert=True, bot_token=active_token)
                 notif_btn = "🔔 Eslatmani o'chirish ❌" if new_state else "🔔 Eslatmani yoqish ✅"
                 kb = {"inline_keyboard": [[{"text": notif_btn, "callback_data": "tgl_notif"}]]}
-                edit_telegram_msg(chat_id, msg_id, f"🔔 <b>Azon eslatmalari holati:</b> {status_txt}", kb, bot_token=active_token)
+                edit_telegram_msg(chat_id, msg_id, f"🔔 <b>Azon eslatmalari holati:</b> {status_txt}\n📍 <b>Tanlangan hudud:</b> {region}", kb, bot_token=active_token)
             except Exception as e:
                 print(f"[NOTIF TGL ERR]: {e}")
             finally:
@@ -3142,18 +3234,11 @@ def handle_telegram_update(update, bot_token=None):
     is_admin = is_admin_user(user_id, username=username, full_name=full_u_name)
     print(f"[TG UPDATE] user_id={user_id}, name='{full_u_name}', is_admin={is_admin}, text='{text}', doc={'yes' if doc else 'no'}")
 
-    # Namoz boti foydalanuvchilarini avtomatik obuna qilish (barcha foydalanuvchilar azon eslatmalarini oladi)
+    # Namoz boti foydalanuvchilarini avtomatik obuna qilish (tanlangan hududni saqlagan holda)
     if is_prayer_bot and user_id:
         try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute(adapt_query("""
-                INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
-                VALUES (?, ?, ?, 'Toshkent', ?)
-                ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username, full_name = excluded.full_name
-            """), (user_id, username, first_name, True if IS_POSTGRES else 1))
-            conn.commit()
-            conn.close()
+            curr_reg = get_user_prayer_region(user_id)
+            set_user_prayer_region(user_id, curr_reg, username=username, full_name=full_u_name)
         except Exception:
             pass
 
@@ -3817,19 +3902,11 @@ def handle_telegram_update(update, bot_token=None):
 
         # Botga qarab mos tabrik matni
         if is_prayer_bot:
-            conn = get_db()
-            c = conn.cursor()
             try:
-                c.execute(adapt_query("""
-                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
-                    VALUES (?, ?, ?, 'Toshkent', ?)
-                    ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username, full_name = excluded.full_name
-                """), (user_id, username, from_user.get("first_name", ""), True if IS_POSTGRES else 1))
-                conn.commit()
+                curr_reg = get_user_prayer_region(user_id)
+                set_user_prayer_region(user_id, curr_reg, username=username, full_name=from_user.get("first_name", ""))
             except Exception as e:
                 print(f"[AUTO PRAYER USER ERR]: {e}")
-            finally:
-                conn.close()
 
             if is_admin:
                 welcome_text = (
@@ -3909,17 +3986,7 @@ def handle_telegram_update(update, bot_token=None):
 
     # ─── NAMOZ VAQTLARI BOTI BUYRUQLARI ───
     if text in ("🕌 Bugungi namoz vaqtlari", "🕌 Namoz vaqtlari", "/namoz"):
-        conn = get_db()
-        c = conn.cursor()
-        region = "Toshkent"
-        try:
-            c.execute(adapt_query("SELECT region FROM prayer_users WHERE telegram_id = ?"), (user_id,))
-            row = c.fetchone()
-            if row and row[0]:
-                region = row[0]
-        finally:
-            conn.close()
-
+        region = get_user_prayer_region(user_id)
         send_or_replace_prayer_card(chat_id, user_id, region, reply_markup=get_prayer_action_keyboard(region), bot_token=active_token)
         return
 
@@ -3928,19 +3995,18 @@ def handle_telegram_update(update, bot_token=None):
         return
 
     if text in ("🔔 Azon eslatmalari", "🔔 Eslatmalar"):
-        conn = get_db()
-        c = conn.cursor()
+        region = get_user_prayer_region(user_id)
         notif_state = True
-        region = "Toshkent"
         try:
-            c.execute(adapt_query("SELECT notifications, region FROM prayer_users WHERE telegram_id = ?"), (user_id,))
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(adapt_query("SELECT notifications FROM prayer_users WHERE telegram_id = ?"), (user_id,))
             row = c.fetchone()
-            if row:
+            if row and row[0] is not None:
                 notif_state = bool(row[0])
-                if len(row) > 1 and row[1]:
-                    region = row[1]
-        finally:
             conn.close()
+        except Exception:
+            pass
 
         p_info = fetch_prayer_times(region)
         next_p = p_info.get("next_prayer", {})
@@ -4591,14 +4657,10 @@ def handle_telegram_update(update, bot_token=None):
                     """, (session_id, phone, user_id, auth_code, jwt_token, uid, expires_at))
             conn.commit()
 
-            # Namoz botiga ham avtomatik ro'yxatdan o'tkazamiz
+            # Namoz botiga ham avtomatik ro'yxatdan o'tkazamiz (tanlangan hududni saqlagan holda)
             try:
-                c.execute(adapt_query("""
-                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
-                    VALUES (?, ?, ?, 'Toshkent', ?)
-                    ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username, full_name = excluded.full_name
-                """), (user_id, username, first_name, True if IS_POSTGRES else 1))
-                conn.commit()
+                curr_reg = get_user_prayer_region(user_id)
+                set_user_prayer_region(user_id, curr_reg, username=username, full_name=first_name)
             except Exception as e_p:
                 print(f"[AUTO PRAYER USER ERR]: {e_p}")
 
@@ -4664,7 +4726,8 @@ def prayer_reminder_thread():
             # Har bir hudud bo'yicha namoz vaqtini tekshiramiz
             region_times = {}
             for u in active_users:
-                reg = u.get("region") or "Toshkent"
+                u_id = u.get("telegram_id")
+                reg = (u.get("region") or "").strip() or get_user_prayer_region(u_id) or "Toshkent"
                 if reg not in region_times:
                     p_data = fetch_prayer_times(reg)
                     region_times[reg] = p_data.get("times", {})
