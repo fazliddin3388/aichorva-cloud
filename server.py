@@ -606,12 +606,45 @@ def init_cloud_database():
         # Boshlang'ich qiymatlarni kiritish (agar mavjud bo'lmasa)
         c.execute(adapt_query("""
             INSERT INTO system_settings (setting_key, setting_value)
-            VALUES ('require_auth', 'true')
+            VALUES ('require_auth', 'false')
             ON CONFLICT (setting_key) DO NOTHING
         """ if IS_POSTGRES else """
             INSERT OR IGNORE INTO system_settings (setting_key, setting_value)
-            VALUES ('require_auth', 'true')
+            VALUES ('require_auth', 'false')
         """))
+
+        # 16. Mobil ilova qurilmalari va Mehmonlar (ro'yxatdan o'tmaganlar ham)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS app_devices (
+                device_id VARCHAR(128) PRIMARY KEY,
+                model VARCHAR(128),
+                os VARCHAR(64),
+                app_version VARCHAR(32),
+                is_registered BOOLEAN DEFAULT FALSE,
+                telegram_id BIGINT,
+                phone VARCHAR(32),
+                farmer_name VARCHAR(128),
+                region VARCHAR(64) DEFAULT 'Toshkent',
+                ip_address VARCHAR(64),
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """ if IS_POSTGRES else """
+            CREATE TABLE IF NOT EXISTS app_devices (
+                device_id TEXT PRIMARY KEY,
+                model TEXT,
+                os TEXT,
+                app_version TEXT,
+                is_registered INTEGER DEFAULT 0,
+                telegram_id INTEGER,
+                phone TEXT,
+                farmer_name TEXT,
+                region TEXT DEFAULT 'Toshkent',
+                ip_address TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
         conn.commit()
 
@@ -700,6 +733,7 @@ def run_cloud_schema_migrations(conn):
         ("advertisements", "media_file_id", "TEXT"),
         ("advertisements", "views_count", "INTEGER DEFAULT 0"),
         ("advertisements", "sent_count", "INTEGER DEFAULT 0"),
+        ("advertisements", "target_audience", "VARCHAR(32) DEFAULT 'all'"),
         ("bulls", "mother_id", "INTEGER"),
         ("bulls", "mother_tag", "VARCHAR(64)" if IS_POSTGRES else "TEXT"),
         ("bulls", "breeding_status", "VARCHAR(32)" if IS_POSTGRES else "TEXT"),
@@ -879,7 +913,7 @@ USER_PRAYER_REGION = {}  # {user_id: region}
 
 
 def get_user_prayer_region(user_id):
-    """Foydalanuvchi yoki Admin tanlagan hududni barcha manbalardan (RAM -> prayer_users -> settings -> Toshkent) xatosiz olish"""
+    """Foydalanuvchi yoki Admin tanlagan hududni barcha manbalardan (RAM -> prayer_users -> settings -> app_devices -> Toshkent) xatosiz olish"""
     if not user_id:
         return "Toshkent"
     try:
@@ -900,8 +934,17 @@ def get_user_prayer_region(user_id):
         c.execute(adapt_query("SELECT region FROM prayer_users WHERE telegram_id = ?"), (uid,))
         row = c.fetchone()
         conn.close()
-        if row and row[0]:
-            reg = str(row[0]).strip()
+        if row:
+            reg = ""
+            if isinstance(row, dict):
+                reg = str(row.get("region") or "").strip()
+            elif isinstance(row, (list, tuple)) and len(row) > 0:
+                reg = str(row[0] or "").strip()
+            elif hasattr(row, "__getitem__"):
+                try: reg = str(row["region"] or "").strip()
+                except Exception:
+                    try: reg = str(row[0] or "").strip()
+                    except Exception: pass
             if reg:
                 USER_PRAYER_REGION[uid] = reg
                 USER_PRAYER_REGION[str(uid)] = reg
@@ -914,12 +957,34 @@ def get_user_prayer_region(user_id):
         saved_reg = get_system_setting(f"user_region_{uid}", "")
         if saved_reg:
             USER_PRAYER_REGION[uid] = saved_reg
+            USER_PRAYER_REGION[str(uid)] = saved_reg
             return saved_reg
         if is_admin_user(uid):
             adm_reg = get_system_setting("admin_prayer_region", "") or get_system_setting("namoz_region", "")
             if adm_reg:
                 USER_PRAYER_REGION[uid] = adm_reg
+                USER_PRAYER_REGION[str(uid)] = adm_reg
                 return adm_reg
+    except Exception:
+        pass
+
+    # 4. app_devices jadvali
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(adapt_query("SELECT region FROM app_devices WHERE telegram_id = ? ORDER BY last_seen DESC LIMIT 1"), (uid,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            reg = ""
+            if isinstance(row, dict):
+                reg = str(row.get("region") or "").strip()
+            elif isinstance(row, (list, tuple)) and len(row) > 0:
+                reg = str(row[0] or "").strip()
+            if reg:
+                USER_PRAYER_REGION[uid] = reg
+                USER_PRAYER_REGION[str(uid)] = reg
+                return reg
     except Exception:
         pass
 
@@ -927,10 +992,12 @@ def get_user_prayer_region(user_id):
 
 
 def set_user_prayer_region(user_id, region, username="", full_name=""):
-    """Foydalanuvchi yoki Admin tanlagan hududni barcha darajalarda (RAM, prayer_users, system_settings) 100% kafolatli saqlash"""
+    """Foydalanuvchi yoki Admin tanlagan hududni barcha darajalarda (RAM, prayer_users, system_settings, app_devices) 100% kafolatli saqlash"""
     if not user_id or not region:
         return
     reg = str(region).strip()
+    if not reg:
+        return
     try:
         uid = int(user_id)
     except Exception:
@@ -949,11 +1016,11 @@ def set_user_prayer_region(user_id, region, username="", full_name=""):
     except Exception as e:
         print(f"[SET REGION SETTING ERR]: {e}")
 
-    # 3. prayer_users jadvaliga yozish (SQLite va Postgres uchun to'g'ri parametrlarda)
-    conn = get_db()
-    c = conn.cursor()
+    # 3. prayer_users jadvaliga yozish
     try:
-        c.execute(adapt_query("SELECT telegram_id, region FROM prayer_users WHERE telegram_id = ?"), (uid,))
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(adapt_query("SELECT telegram_id FROM prayer_users WHERE telegram_id = ?"), (uid,))
         row = c.fetchone()
         if row:
             c.execute(adapt_query("UPDATE prayer_users SET region = ?, username = COALESCE(NULLIF(?, ''), username), full_name = COALESCE(NULLIF(?, ''), full_name) WHERE telegram_id = ?"),
@@ -963,19 +1030,67 @@ def set_user_prayer_region(user_id, region, username="", full_name=""):
                 c.execute("""
                     INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
                     VALUES (%s, %s, %s, %s, TRUE)
+                    ON CONFLICT (telegram_id) DO UPDATE SET region = EXCLUDED.region
                 """, (uid, username or "", full_name or "", reg))
             else:
                 c.execute("""
                     INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
                     VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT (telegram_id) DO UPDATE SET region = excluded.region
                 """, (uid, username or "", full_name or "", reg))
         conn.commit()
+        conn.close()
         print(f"[REGION SAVED OK] user_id={uid} -> '{reg}'")
     except Exception as e:
         print(f"[REGION SAVE DB ERR]: {e}")
-        traceback.print_exc()
-    finally:
+
+    # 4. app_devices jadvali (agar ushbu telegram_id bo'lsa yangilaymiz)
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(adapt_query("UPDATE app_devices SET region = ? WHERE telegram_id = ?"), (reg, uid))
+        conn.commit()
         conn.close()
+    except Exception:
+        pass
+
+
+def ensure_prayer_user_exists(user_id, username="", full_name=""):
+    """Foydalanuvchini prayer_users jadvalida ro'yxatga olish yoki nomini yangilash, LEKIN avval tanlagan hududini hech qachon o'chirib yubormaslik!"""
+    if not user_id:
+        return
+    try:
+        uid = int(user_id)
+    except Exception:
+        uid = user_id
+
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(adapt_query("SELECT region FROM prayer_users WHERE telegram_id = ?"), (uid,))
+        row = c.fetchone()
+        if row:
+            # Mavjud foydalanuvchi: faqat ism/username yangilanadi, mavjud hududga aslo tegilmaydi!
+            c.execute(adapt_query("UPDATE prayer_users SET username = COALESCE(NULLIF(?, ''), username), full_name = COALESCE(NULLIF(?, ''), full_name) WHERE telegram_id = ?"),
+                      (username or "", full_name or "", uid))
+        else:
+            # Yangi foydalanuvchi: avval saqlangan hudud bormi tekshiramiz
+            default_reg = get_user_prayer_region(uid) or "Toshkent"
+            if IS_POSTGRES:
+                c.execute("""
+                    INSERT INTO prayer_users (telegram_id, username, full_name, region, notifications)
+                    VALUES (%s, %s, %s, %s, TRUE)
+                    ON CONFLICT (telegram_id) DO NOTHING
+                """, (uid, username or "", full_name or "", default_reg))
+            else:
+                c.execute("""
+                    INSERT OR IGNORE INTO prayer_users (telegram_id, username, full_name, region, notifications)
+                    VALUES (?, ?, ?, ?, 1)
+                """, (uid, username or "", full_name or "", default_reg))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[ENSURE PRAYER USER ERR]: {e}")
 
 
 def fetch_prayer_times(region="Toshkent"):
@@ -2068,7 +2183,7 @@ def format_advertisements_list(page=1, per_page=5):
 def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
     """
     To'liq audit va tahliliy hisobot bilan barcha foydalanuvchilarga reklama tarqatish.
-    Surat, video, fayl yoki matnni ikkala bot obunachilariga xavfsiz va to'lqinli yuboradi.
+    Auditoriya filtri (all, registered, guests) bo'yicha to'liq ishlaydi.
     """
     start_time = time.time()
     now_dt = get_now_tashkent()
@@ -2079,33 +2194,82 @@ def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
     file_id = draft.get("file_id")
     text_content = draft.get("text", "")
     ad_title = draft.get("title") or (text_content.split("\n")[0][:50] if text_content else "E'lon")
+    target = draft.get("target", "all")
+
+    target_names = {
+        "all": "👥 Barchaga (Fermerlar + Mehmonlar)",
+        "registered": "👤 Faqat ro'yxatdan o'tganlarga (Fermerlar)",
+        "guests": "📱 Faqat ro'yxatdan o'tmagan mehmonlarga"
+    }
 
     conn = get_db()
     c = dict_cursor(conn)
     chorva_users = set()
     prayer_users = set()
+    guest_devices_count = 0
     try:
-        c.execute(adapt_query("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"))
-        for r in c.fetchall():
-            if r["telegram_id"]: chorva_users.add(int(r["telegram_id"]))
+        if target != 'guests':
+            c.execute(adapt_query("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL"))
+            for r in c.fetchall():
+                if r["telegram_id"]: chorva_users.add(int(r["telegram_id"]))
 
-        c.execute(adapt_query("SELECT telegram_id FROM prayer_users WHERE telegram_id IS NOT NULL"))
-        for r in c.fetchall():
-            if r["telegram_id"]: prayer_users.add(int(r["telegram_id"]))
+            if target == 'all':
+                c.execute(adapt_query("SELECT telegram_id FROM prayer_users WHERE telegram_id IS NOT NULL"))
+                for r in c.fetchall():
+                    if r["telegram_id"]: prayer_users.add(int(r["telegram_id"]))
+
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ? OR is_registered IS NULL"), (False if IS_POSTGRES else 0,))
+        r_g = c.fetchone()
+        guest_devices_count = r_g["cnt"] if r_g else 0
     finally:
         conn.close()
 
     all_recipients = prayer_users | chorva_users
     total_recipients = len(all_recipients)
 
+    # Agar maqsad faqat mehmonlar bo'lsa (Telegram a'zolariga jo'natilmaydi, faqat ilovaga yoziladi)
+    if target == 'guests':
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(adapt_query("""
+                INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count, target_audience)
+                VALUES (?, ?, 'broadcast', ?, ?, ?, 0, 'guests')
+            """), (ad_title, text_content, True if IS_POSTGRES else 1, m_type, file_id))
+            conn.commit()
+            conn.close()
+        except Exception as e_save:
+            print(f"[SAVE GUEST AD ERR]: {e_save}")
+
+        guest_report = (
+            "╭────────────────────────╮\n"
+            "   ✅  <b>MEHMONLARGA E'LON SAQLANDI!</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"🏷 <b>E'lon:</b> <i>«{ad_title}»</i>\n"
+            f"🎯 <b>Auditoriya:</b> 📱 Faqat ro'yxatdan o'tmagan mehmonlar\n"
+            f"📱 <b>Qamrov:</b> <b>{guest_devices_count} ta</b> mobil qurilma\n\n"
+            "✨ Ushbu e'lon faqat ro'yxatdan o'tmagan ilova foydalanuvchilariga ko'rsatiladi!\n"
+            "Telegram bot obunachilariga xalaqit bermaslik uchun yuborilmadi."
+        )
+        kb_done = {
+            "inline_keyboard": [
+                [{"text": "📋 Barcha reklamalar ro'yxati", "callback_data": "ad_hub_list_1"}],
+                [{"text": "🚀 Yangi reklama yaratish", "callback_data": "ad_hub_new"}],
+                [{"text": "🔙 Reklamalar markaziga qaytish", "callback_data": "ad_hub_main"}]
+            ]
+        }
+        send_telegram_msg(admin_chat_id, guest_report, reply_markup=kb_done, bot_token=bot_token)
+        return
+
     if total_recipients == 0:
-        send_telegram_msg(admin_chat_id, "⚠️ Baza bo'sh! Birorta ham qabul qiluvchi Telegram foydalanuvchi topilmadi.", bot_token=bot_token)
+        send_telegram_msg(admin_chat_id, "⚠️ Baza bo'sh! Tanlangan auditoriyada Telegram foydalanuvchilar topilmadi.", bot_token=bot_token)
         return
 
     send_telegram_msg(
         admin_chat_id, 
         f"⏳ <b>Reklama tarqatish boshlandi...</b>\n"
-        f"👥 Jami qamrov: <b>{total_recipients} ta</b> foydalanuvchi.\n"
+        f"🎯 Auditoriya: <b>{target_names.get(target, target)}</b>\n"
+        f"👥 Telegram qamrovi: <b>{total_recipients} ta</b> foydalanuvchi.\n"
         f"<i>Tugashi bilan to'liq tahliliy hisobot shu yerga yuboriladi.</i>", 
         bot_token=bot_token
     )
@@ -2119,8 +2283,8 @@ def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
     BATCH_SIZE = 25
     batch_counter = 0
 
-    # A) Asl Namoz boti a'zolariga jo'natish
-    if PRAYER_BOT_TOKEN:
+    # A) Asl Namoz boti a'zolariga jo'natish (agar all bo'lsa)
+    if PRAYER_BOT_TOKEN and prayer_users:
         for tid in prayer_users:
             ok, is_bl, err = send_telegram_media_generic(tid, m_type, file_id, text_content, bot_token=PRAYER_BOT_TOKEN)
             if ok:
@@ -2138,7 +2302,7 @@ def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
 
     # B) AI Chorva boti a'zolariga
     remaining_chorva = chorva_users - prayer_users
-    if CHORVA_BOT_TOKEN:
+    if CHORVA_BOT_TOKEN and remaining_chorva:
         for tid in remaining_chorva:
             ok, is_bl, err = send_telegram_media_generic(tid, m_type, file_id, text_content, bot_token=CHORVA_BOT_TOKEN)
             if ok:
@@ -2154,14 +2318,14 @@ def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
             else:
                 time.sleep(0.04)
 
-    # Mobil ilova uchun ma'lumotlar bazasiga saqlash
+    # Mobil ilova uchun ma'lumotlar bazasiga saqlash (target_audience bilan)
     try:
         conn = get_db()
         c = conn.cursor()
         c.execute(adapt_query("""
-            INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count)
-            VALUES (?, ?, 'broadcast', ?, ?, ?, ?)
-        """), (ad_title, text_content, True if IS_POSTGRES else 1, m_type, file_id, success_count))
+            INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count, target_audience)
+            VALUES (?, ?, 'broadcast', ?, ?, ?, ?, ?)
+        """), (ad_title, text_content, True if IS_POSTGRES else 1, m_type, file_id, success_count, target))
         conn.commit()
         conn.close()
     except Exception as e_save:
@@ -2189,6 +2353,7 @@ def execute_broadcast_campaign(admin_chat_id, draft, bot_token=None):
         "   📊  <b>REKLAMA TARQATISH HISOBOTI</b>\n"
         "╰────────────────────────╯\n\n"
         f"🏷 <b>E'lon:</b> <i>«{ad_title}»</i>\n"
+        f"🎯 <b>Auditoriya:</b> {target_names.get(target, target)}\n"
         f"📂 <b>Format:</b> <b>{format_label}</b>\n"
         f"📅 <b>Sana:</b> {start_date} | 🕒 <b>Vaqt:</b> {start_str} ➔ {end_str}\n\n"
         "📈 <b>NATIJALAR TAHLILI:</b>\n"
@@ -2224,17 +2389,19 @@ def get_admin_panel_menu(is_prayer_bot=False):
     if is_prayer_bot:
         kb = [
             [{"text": "📣 Reklama va E'lonlar markazi"}, {"text": "📊 Baza statistikasi"}],
-            [{"text": "🔔 Azon eslatmasini sinash"}, {"text": "🔙 Asosiy menyuga qaytish"}],
+            [{"text": "📱 Qurilmalar (Mehmonlar)"}, {"text": "🔔 Azon eslatmasini sinash"}],
+            [{"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     else:
-        auth_required = (get_system_setting("require_auth", "true") == "true")
+        auth_required = (get_system_setting("require_auth", "false") == "true")
         auth_btn_text = "🔒 Majburiy kirish: YOQILGAN 🟢" if auth_required else "🔓 Majburiy kirish: O'CHIRILGAN 🔴"
         kb = [
-            [{"text": "👥 Foydalanuvchilar ro'yxati"}, {"text": "📊 Baza statistikasi"}],
-            [{"text": auth_btn_text}, {"text": "🐙 GitHub Zaxira (Kunlik)"}],
-            [{"text": "💾 Bazani yuklab olish"}, {"text": "📥 Bazani tiklash"}],
-            [{"text": "📦 Yangi APK yuklash"}, {"text": "📢 Versiya yangiligini e'lon qilish"}],
-            [{"text": "📣 Reklama va E'lonlar markazi"}, {"text": "🔙 Asosiy menyuga qaytish"}],
+            [{"text": "👥 Foydalanuvchilar ro'yxati"}, {"text": "📱 Qurilmalar (Mehmonlar)"}],
+            [{"text": "📊 Baza statistikasi"}, {"text": auth_btn_text}],
+            [{"text": "🐙 GitHub Zaxira (Kunlik)"}, {"text": "💾 Bazani yuklab olish"}],
+            [{"text": "📥 Bazani tiklash"}, {"text": "📦 Yangi APK yuklash"}],
+            [{"text": "📢 Versiya yangiligini e'lon qilish"}, {"text": "📣 Reklama va E'lonlar markazi"}],
+            [{"text": "🔙 Asosiy menyuga qaytish"}],
         ]
     return {
         "keyboard": kb,
@@ -2393,6 +2560,216 @@ def format_user_details(user_id, return_page=1):
         conn.close()
 
 
+def format_device_list_keyboard(page=1, filter_type='all', per_page=5):
+    """Mobil ilovadan foydalanuvchi barcha qurilmalar va mehmonlar monitoringi"""
+    conn = get_db()
+    c = dict_cursor(conn)
+    try:
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices"))
+        r_all = c.fetchone()
+        total_cnt = r_all["cnt"] if r_all else 0
+
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ?"), (True if IS_POSTGRES else 1,))
+        r_reg = c.fetchone()
+        reg_cnt = r_reg["cnt"] if r_reg else 0
+
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ? OR is_registered IS NULL"), (False if IS_POSTGRES else 0,))
+        r_gst = c.fetchone()
+        guest_cnt = r_gst["cnt"] if r_gst else 0
+
+        if filter_type == 'registered':
+            where_clause = "WHERE is_registered = ?"
+            params = [True if IS_POSTGRES else 1]
+            current_total = reg_cnt
+            filter_label = "Faqat Ro'yxatdan o'tganlar"
+        elif filter_type == 'guests':
+            where_clause = "WHERE is_registered = ? OR is_registered IS NULL"
+            params = [False if IS_POSTGRES else 0]
+            current_total = guest_cnt
+            filter_label = "Faqat Mehmonlar (Ro'yxatdan o'tmagan)"
+        else:
+            filter_type = 'all'
+            where_clause = ""
+            params = []
+            current_total = total_cnt
+            filter_label = "Barcha qurilmalar"
+
+        total_pages = max(1, (current_total + per_page - 1) // per_page)
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * per_page
+
+        q = f"""
+            SELECT device_id, model, os, app_version, is_registered, telegram_id, phone, farmer_name, region, ip_address, last_seen, first_seen
+            FROM app_devices
+            {where_clause}
+            ORDER BY last_seen DESC
+            LIMIT ? OFFSET ?
+        """
+        c.execute(adapt_query(q), tuple(params + [per_page, offset]))
+        devices = c.fetchall()
+
+        summary_text = (
+            "╭────────────────────────╮\n"
+            "   📱  <b>QURILMALAR VA MEHMONLAR</b>\n"
+            "╰────────────────────────╯\n\n"
+            f"📊 <b>Jami aniqlangan qurilmalar:</b> <b>{total_cnt} ta</b>\n"
+            f" ├ 👤 <b>Ro'yxatdan o'tgan fermerlar:</b> <b>{reg_cnt} ta</b>\n"
+            f" └ 📱 <b>Mehmonlar (o'tmaganlar):</b> <b>{guest_cnt} ta</b>\n\n"
+            f"🔍 <b>Hozirgi filtr:</b> <b>{filter_label}</b> ({current_total} ta)\n"
+            f"📄 <b>Sahifa:</b> <b>{page} / {total_pages}</b>\n"
+            "────────────────────────\n"
+        )
+
+        if not devices:
+            summary_text += "<i>Hozircha hech qanday qurilma topilmadi.</i>\n"
+        else:
+            for idx, d in enumerate(devices, start=offset + 1):
+                is_reg = bool(d.get("is_registered"))
+                m_icon = "👤" if is_reg else "📱"
+                if is_reg:
+                    fname = d.get('farmer_name') or 'Fermer'
+                    fph = d.get('phone') or 'Tel kiritilmagan'
+                    st_text = f"👤 Fermer: <b>{fname}</b> (<code>{fph}</code>)"
+                else:
+                    st_text = "📱 <b>Mehmon</b> (Ro'yxatdan o'tmagan)"
+
+                model_str = d.get("model") or "Android telefon"
+                os_str = d.get("os") or "Android"
+                ver_str = f"v{d.get('app_version')}" if d.get('app_version') else ""
+                reg_str = d.get("region") or "Toshkent"
+                ls = d.get("last_seen")
+                ls_str = str(ls)[:16] if ls else "Hozirgina"
+
+                summary_text += (
+                    f"<b>{idx}. {m_icon} {model_str}</b> ({os_str} {ver_str})\n"
+                    f"   ├ <b>Holati:</b> {st_text}\n"
+                    f"   ├ 📍 <b>Hudud:</b> {reg_str}\n"
+                    f"   └ 🕒 <b>Faollik:</b> {ls_str}\n\n"
+                )
+
+        inline_kb = []
+        btn_all = ("✅ 🌐 Barchasi" if filter_type == 'all' else "🌐 Barchasi") + f" ({total_cnt})"
+        btn_reg = ("✅ 👤 Fermerlar" if filter_type == 'registered' else "👤 Fermerlar") + f" ({reg_cnt})"
+        btn_gst = ("✅ 📱 Mehmonlar" if filter_type == 'guests' else "📱 Mehmonlar") + f" ({guest_cnt})"
+
+        inline_kb.append([
+            {"text": btn_all, "callback_data": "dev_filter_all"},
+            {"text": btn_reg, "callback_data": "dev_filter_registered"}
+        ])
+        inline_kb.append([
+            {"text": btn_gst, "callback_data": "dev_filter_guests"}
+        ])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append({"text": "◀️ Oldingi", "callback_data": f"dev_page_{page - 1}_{filter_type}"})
+        nav_row.append({"text": f"📄 {page} / {total_pages}", "callback_data": f"dev_page_{page}_{filter_type}"})
+        if page < total_pages:
+            nav_row.append({"text": "Keyingi ▶️", "callback_data": f"dev_page_{page + 1}_{filter_type}"})
+        if nav_row:
+            inline_kb.append(nav_row)
+
+        inline_kb.append([
+            {"text": "🔄 Yangilash", "callback_data": f"dev_page_{page}_{filter_type}"},
+            {"text": "🔙 Yopish", "callback_data": "dev_close"}
+        ])
+
+        return summary_text, {"inline_keyboard": inline_kb}
+    finally:
+        conn.close()
+
+
+def format_broadcast_preview_text(draft):
+    """Admin reklama qoralama matni va tanlangan auditoriya bo'yicha qamrov hisoboti"""
+    m_type = draft.get("type", "text")
+    target = draft.get("target", "all")
+
+    conn = get_db()
+    c = dict_cursor(conn)
+    tg_users_cnt = 0
+    total_devices = 0
+    reg_devices = 0
+    guest_devices = 0
+    try:
+        c.execute(adapt_query("SELECT COUNT(DISTINCT telegram_id) as cnt FROM (SELECT telegram_id FROM users UNION SELECT telegram_id FROM prayer_users)"))
+        row_tg = c.fetchone()
+        tg_users_cnt = row_tg["cnt"] if row_tg else 0
+
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices"))
+        row_dev = c.fetchone()
+        total_devices = row_dev["cnt"] if row_dev else 0
+
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ?"), (True if IS_POSTGRES else 1,))
+        row_reg = c.fetchone()
+        reg_devices = row_reg["cnt"] if row_reg else 0
+
+        c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ? OR is_registered IS NULL"), (False if IS_POSTGRES else 0,))
+        row_gst = c.fetchone()
+        guest_devices = row_gst["cnt"] if row_gst else 0
+    finally:
+        conn.close()
+
+    type_names = {
+        "photo": "📸 Suratli reklama",
+        "video": "🎥 Video rolik",
+        "document": "📁 Fayl / Hujjat",
+        "text": "📝 Matnli e'lon"
+    }
+
+    if target == 'registered':
+        target_name = "👤 Faqat ro'yxatdan o'tganlarga (Fermerlar)"
+        reach_desc = f"• Telegram bot obunachilari: <b>{tg_users_cnt} ta</b>\n• Ro'yxatdan o'tgan mobil ilovachilar: <b>{reg_devices} ta</b>\n<i>(Mehmon qurilmalarga yuborilmaydi)</i>"
+        total_reach = tg_users_cnt
+    elif target == 'guests':
+        target_name = "📱 Faqat ro'yxatdan o'tmaganlarga (Mehmonlar)"
+        reach_desc = f"• Ro'yxatdan o'tmagan (mehmon) qurilmalar: <b>{guest_devices} ta</b>\n<i>(Telegram bot a'zolariga yuborilmaydi, faqat mobil ilovada chiqadi)</i>"
+        total_reach = guest_devices
+    else:
+        target = 'all'
+        target_name = "👥 Barchaga (Fermerlar + Mehmonlar)"
+        reach_desc = f"• Telegram bot foydalanuvchilari: <b>{tg_users_cnt} ta</b>\n• Mobil ilova mehmon qurilmalari: <b>{guest_devices} ta</b>"
+        total_reach = tg_users_cnt + guest_devices
+
+    preview_prompt = (
+        "╭────────────────────────╮\n"
+        "   👁  <b>REKLAMA TAYYOR BO'LDI!</b>\n"
+        "╰────────────────────────╯\n\n"
+        f"📌 <b>Format:</b> <b>{type_names.get(m_type, '📝 Matn')}</b>\n"
+        f"🎯 <b>Tanlangan auditoriya:</b> <b>{target_name}</b>\n\n"
+        f"📊 <b>Kutilayotgan qamrov:</b> <b>{total_reach} ta</b>\n"
+        f"{reach_desc}\n\n"
+        "💡 <i>Quyidagi tugmalar orqali xabar kimlarga borishini bitta bosish bilan filtrlashingiz mumkin:</i>"
+    )
+    return preview_prompt
+
+
+def get_broadcast_confirm_keyboard(target='all'):
+    """Admin reklama auditoriyasini bitta tugma bilan filtrlash klaviaturasi"""
+    btn_all = ("✅ 👥 Barchaga" if target == 'all' else "👥 Barchaga")
+    btn_reg = ("✅ 👤 Ro'yxatdan o'tganlar" if target == 'registered' else "👤 Ro'yxatdan o'tganlar")
+    btn_gst = ("✅ 📱 Mehmonlar" if target == 'guests' else "📱 Mehmonlar")
+    return {
+        "inline_keyboard": [
+            [
+                {"text": btn_all, "callback_data": "bc_tgt_all"},
+                {"text": btn_reg, "callback_data": "bc_tgt_registered"}
+            ],
+            [
+                {"text": btn_gst, "callback_data": "bc_tgt_guests"}
+            ],
+            [
+                {"text": "🚀 Xabarni Tarqatish", "callback_data": "confirm_send_broadcast"}
+            ],
+            [
+                {"text": "📱 Faqat mobil ilovaga saqlash", "callback_data": "save_app_only_broadcast"}
+            ],
+            [
+                {"text": "❌ Bekor qilish", "callback_data": "cancel_broadcast_draft"}
+            ]
+        ]
+    }
+
+
 def export_database_json():
     """Barcha jadvallarni JSON zaxira fayliga chiqarish"""
     conn = get_db()
@@ -2402,7 +2779,7 @@ def export_database_json():
         "users", "prayer_users", "bulls", "weighings", "feed_logs", 
         "feed_inventory", "other_expenses", "cash_transactions", "debts", 
         "debt_payments", "vaccine_schedules", "advertisements", 
-        "app_releases", "system_settings"
+        "app_releases", "system_settings", "app_devices"
     ]
     try:
         for t in tables:
@@ -2802,9 +3179,13 @@ def handle_telegram_update(update, bot_token=None):
             return
 
         if cb_data.startswith("prov_"):
-            province = cb_data.replace("prov_", "")
-            answer_callback_query(cb_id, bot_token=active_token)
-            edit_telegram_msg(chat_id, msg_id, f"📍 <b>{province}</b>: Tuman yoki shahringizni tanlang:", get_cities_inline_keyboard(province), bot_token=active_token)
+            province = cb_data.replace("prov_", "").strip()
+            # Viloyat tanlanishi bilanoq, uning markazini darhol avtomatik saqlaymiz:
+            cities = PRAYER_DATA.get(province, [])
+            default_center = cities[0] if cities else province
+            set_user_prayer_region(user_id, default_center, username=username, full_name=full_u_name)
+            answer_callback_query(cb_id, f"📍 {province} tanlandi!", bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, f"📍 <b>{province}</b>: Tuman yoki shahringizni tanlang (yoki markaz: <b>{default_center}</b> bo'yicha qoldiring):", get_cities_inline_keyboard(province), bot_token=active_token)
             return
 
         if cb_data.startswith("pr_"):
@@ -3166,6 +3547,39 @@ def handle_telegram_update(update, bot_token=None):
             threading.Thread(target=execute_broadcast_campaign, args=(chat_id, draft, active_token), daemon=True).start()
             return
 
+        if cb_data.startswith("bc_tgt_") and is_admin:
+            tgt = cb_data.replace("bc_tgt_", "")
+            draft = PENDING_BROADCASTS.get(chat_id)
+            if draft:
+                draft["target"] = tgt
+                prompt_txt = format_broadcast_preview_text(draft)
+                answer_callback_query(cb_id, f"Auditoriya tanlandi: {tgt}", bot_token=active_token)
+                edit_telegram_msg(chat_id, msg_id, prompt_txt, get_broadcast_confirm_keyboard(tgt), bot_token=active_token)
+            else:
+                answer_callback_query(cb_id, "Qoralama topilmadi", show_alert=True, bot_token=active_token)
+            return
+
+        if cb_data.startswith("dev_page_") and is_admin:
+            parts = cb_data.split("_")
+            page_num = int(parts[2])
+            f_type = parts[3] if len(parts) > 3 else "all"
+            answer_callback_query(cb_id, bot_token=active_token)
+            text_out, kb_out = format_device_list_keyboard(page=page_num, filter_type=f_type)
+            edit_telegram_msg(chat_id, msg_id, text_out, kb_out, bot_token=active_token)
+            return
+
+        if cb_data.startswith("dev_filter_") and is_admin:
+            f_type = cb_data.replace("dev_filter_", "")
+            answer_callback_query(cb_id, f"Filtr: {f_type}", bot_token=active_token)
+            text_out, kb_out = format_device_list_keyboard(page=1, filter_type=f_type)
+            edit_telegram_msg(chat_id, msg_id, text_out, kb_out, bot_token=active_token)
+            return
+
+        if cb_data == "dev_close" and is_admin:
+            answer_callback_query(cb_id, bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "📱 <i>Qurilmalar monitoringi yopildi.</i>", reply_markup=None, bot_token=active_token)
+            return
+
         if cb_data == "confirm_send_broadcast" and is_admin:
             draft = PENDING_BROADCASTS.pop(chat_id, None)
             ADMIN_STATE.pop(chat_id, None)
@@ -3173,8 +3587,9 @@ def handle_telegram_update(update, bot_token=None):
                 answer_callback_query(cb_id, "Xabar qoralamasi muddati o'tgan yoki topilmadi.", show_alert=True, bot_token=active_token)
                 return
 
+            tgt = draft.get("target", "all")
             answer_callback_query(cb_id, "Tarqatish boshlandi!", bot_token=active_token)
-            edit_telegram_msg(chat_id, msg_id, "🚀 <b>Reklama barcha foydalanuvchilarga tarqatilmoqda...</b>\n<i>Kuting, hisobot tez orada tayyor bo'ladi.</i>", reply_markup=None, bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, "🚀 <b>Reklama tanlangan auditoriyaga tarqatilmoqda...</b>\n<i>Kuting, hisobot tez orada tayyor bo'ladi.</i>", reply_markup=None, bot_token=active_token)
             threading.Thread(target=execute_broadcast_campaign, args=(chat_id, draft, active_token), daemon=True).start()
             return
 
@@ -3189,20 +3604,22 @@ def handle_telegram_update(update, bot_token=None):
             f_id = draft.get("file_id")
             txt = draft.get("text", "")
             title = draft.get("title") or (txt.split("\n")[0][:50] if txt else "E'lon")
+            tgt = draft.get("target", "all")
 
             conn = get_db()
             c = conn.cursor()
             try:
                 c.execute(adapt_query("""
-                    INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count)
-                    VALUES (?, ?, 'broadcast', ?, ?, ?, 0)
-                """), (title, txt, True if IS_POSTGRES else 1, m_t, f_id))
+                    INSERT INTO advertisements (title, description, category, is_active, media_type, media_file_id, sent_count, target_audience)
+                    VALUES (?, ?, 'broadcast', ?, ?, ?, 0, ?)
+                """), (title, txt, True if IS_POSTGRES else 1, m_t, f_id, tgt))
                 conn.commit()
             finally:
                 conn.close()
 
-            answer_callback_query(cb_id, "Faqat ilovaga saqlandi!", show_alert=True, bot_token=active_token)
-            edit_telegram_msg(chat_id, msg_id, "✅ <b>E'lon faqat AI Chorva mobil ilovasi uchun muvaffaqiyatli saqlandi!</b>", reply_markup=None, bot_token=active_token)
+            tgt_names = {"all": "Barchaga", "registered": "Ro'yxatdan o'tganlar", "guests": "Mehmonlar"}
+            answer_callback_query(cb_id, f"Faqat ilovaga saqlandi ({tgt_names.get(tgt, tgt)})!", show_alert=True, bot_token=active_token)
+            edit_telegram_msg(chat_id, msg_id, f"✅ <b>E'lon mobil ilova uchun muvaffaqiyatli saqlandi!</b>\n🎯 <b>Auditoriya:</b> {tgt_names.get(tgt, tgt)}", reply_markup=None, bot_token=active_token)
             send_telegram_msg(chat_id, "Boshqaruv menyusi:", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
             return
 
@@ -3234,11 +3651,10 @@ def handle_telegram_update(update, bot_token=None):
     is_admin = is_admin_user(user_id, username=username, full_name=full_u_name)
     print(f"[TG UPDATE] user_id={user_id}, name='{full_u_name}', is_admin={is_admin}, text='{text}', doc={'yes' if doc else 'no'}")
 
-    # Namoz boti foydalanuvchilarini avtomatik obuna qilish (tanlangan hududni saqlagan holda)
+    # Namoz boti foydalanuvchilarini avtomatik obuna qilish (tanlangan hudud aslo o'zgarmaydi)
     if is_prayer_bot and user_id:
         try:
-            curr_reg = get_user_prayer_region(user_id)
-            set_user_prayer_region(user_id, curr_reg, username=username, full_name=full_u_name)
+            ensure_prayer_user_exists(user_id, username=username, full_name=full_u_name)
         except Exception:
             pass
 
@@ -3745,57 +4161,25 @@ def handle_telegram_update(update, bot_token=None):
 
         ad_title = caption_txt.split("\n")[0][:50] if caption_txt else (f_name_doc or "Yangi e'lon")
 
-        # Qoralamani saqlaymiz
+        # Qoralamani saqlaymiz (sukut bo'yicha target='all')
         draft = {
             "type": m_type,
             "file_id": m_fid,
             "file_name": f_name_doc,
             "text": caption_txt,
-            "title": ad_title
+            "title": ad_title,
+            "target": "all"
         }
         PENDING_BROADCASTS[chat_id] = draft
         ADMIN_STATE.pop(chat_id, None)
-
-        # Qabul qiluvchilar umumiy sonini aniqlash
-        conn = get_db()
-        c = dict_cursor(conn)
-        total_recipients = 0
-        try:
-            c.execute(adapt_query("SELECT COUNT(DISTINCT telegram_id) as cnt FROM (SELECT telegram_id FROM users UNION SELECT telegram_id FROM prayer_users)"))
-            row_cnt = c.fetchone()
-            total_recipients = row_cnt["cnt"] if row_cnt else 0
-        finally:
-            conn.close()
-
-        type_names = {
-            "photo": "📸 Suratli reklama",
-            "video": "🎥 Video rolik",
-            "document": "📁 Fayl / Hujjat",
-            "text": "📝 Matnli e'lon"
-        }
 
         # 1. Avval prevyu sifatida xabarning o'zini adminning o'ziga yuboramiz
         send_telegram_msg(chat_id, "👀 <b>XABARNING ASL KO'RINISHI (PREVIEW):</b>", bot_token=active_token)
         send_telegram_media_generic(chat_id, m_type, m_fid, caption_txt, bot_token=active_token)
 
-        # 2. Keyin boshqaruv va tasdiqlash tugmalarini beramiz
-        preview_prompt = (
-            "╭────────────────────────╮\n"
-            "   👁  <b>REKLAMA TAYYOR BO'LDI!</b>\n"
-            "╰────────────────────────╯\n\n"
-            f"📌 <b>Format:</b> <b>{type_names.get(m_type, '📝 Matn')}</b>\n"
-            f"👥 <b>Qamrov:</b> <b>{total_recipients} ta</b> faol foydalanuvchi\n\n"
-            "Yuqoridagi xabar barcha Telegram a'zolariga to'liq yetkaziladi va "
-            "AI Chorva mobil ilovasida ham e'lon sifatida saqlanadi.\n\n"
-            "👇 <i>Tarqatishni tasdiqlaysizmi?</i>"
-        )
-        confirm_kb = {
-            "inline_keyboard": [
-                [{"text": "🚀 Ha, barcha foydalanuvchilarga tarqatish", "callback_data": "confirm_send_broadcast"}],
-                [{"text": "📱 Faqat mobil ilovaga saqlash (Botlarga yubormasdan)", "callback_data": "save_app_only_broadcast"}],
-                [{"text": "❌ Bekor qilish", "callback_data": "cancel_broadcast_draft"}]
-            ]
-        }
+        # 2. Keyin boshqaruv va auditoriyani filtrlash tugmalarini beramiz
+        preview_prompt = format_broadcast_preview_text(draft)
+        confirm_kb = get_broadcast_confirm_keyboard("all")
         send_telegram_msg(chat_id, preview_prompt, reply_markup=confirm_kb, bot_token=active_token)
         return
 
@@ -3812,6 +4196,12 @@ def handle_telegram_update(update, bot_token=None):
             "👇 <i>Kerakli bo'limni tanlang:</i>"
         )
         send_telegram_msg(chat_id, hub_text, reply_markup=get_ads_hub_keyboard(), bot_token=active_token)
+        return
+
+    # 2.5. Admin Qurilmalar va Mehmonlar monitoringi
+    if is_admin and text in ("📱 Qurilmalar (Mehmonlar)", "📱 Qurilmalar", "/devices", "/mehmonlar", "/qurilmalar"):
+        text_out, kb_out = format_device_list_keyboard(page=1, filter_type='all')
+        send_telegram_msg(chat_id, text_out, reply_markup=kb_out, bot_token=active_token)
         return
 
     # 3. Admin statistika buyrug'i
@@ -3831,14 +4221,30 @@ def handle_telegram_update(update, bot_token=None):
             c.execute(adapt_query("SELECT COUNT(*) as cnt FROM advertisements WHERE is_active = ?"), (True if IS_POSTGRES else 1,))
             total_ads = c.fetchone()["cnt"]
 
+            # Mobil qurilmalar va mehmonlar
+            c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices"))
+            r_dev = c.fetchone()
+            total_dev = r_dev["cnt"] if r_dev else 0
+
+            c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ?"), (True if IS_POSTGRES else 1,))
+            r_reg = c.fetchone()
+            reg_dev = r_reg["cnt"] if r_reg else 0
+
+            c.execute(adapt_query("SELECT COUNT(*) as cnt FROM app_devices WHERE is_registered = ? OR is_registered IS NULL"), (False if IS_POSTGRES else 0,))
+            r_gst = c.fetchone()
+            guest_dev = r_gst["cnt"] if r_gst else 0
+
             stat_text = (
                 "╭────────────────────────╮\n"
                 "   📊  <b>TIZIM BAZASI STATISTIKASI</b>\n"
                 "╰────────────────────────╯\n\n"
                 f"🕌 <b>Namoz taqvimi obunachilari:</b> <b>{total_prayer} ta</b>\n"
-                f"👥 <b>Fermerlar (Foydalanuvchilar):</b> <b>{total_users} ta</b>\n"
+                f"👥 <b>Fermerlar (Telegram foydalanuvchilar):</b> <b>{total_users} ta</b>\n"
                 f"🐂 <b>Hisobdagi jami jonivorlar:</b> <b>{total_bulls} ta</b>\n"
                 f"📢 <b>Faol e'lon va reklamalar:</b> <b>{total_ads} ta</b>\n\n"
+                f"📱 <b>MOBIL ILOVA QURILMALARI:</b> <b>{total_dev} ta</b>\n"
+                f" ├ 👤 <b>Ro'yxatdan o'tgan fermerlar:</b> {reg_dev} ta\n"
+                f" └ 📱 <b>Mehmonlar (ro'yxatdan o'tmagan):</b> {guest_dev} ta\n\n"
                 "🟢 <i>Ikkala Telegram bot va mobil API 100% barqaror ishlamoqda.</i>"
             )
             send_telegram_msg(chat_id, stat_text, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
@@ -3903,8 +4309,7 @@ def handle_telegram_update(update, bot_token=None):
         # Botga qarab mos tabrik matni
         if is_prayer_bot:
             try:
-                curr_reg = get_user_prayer_region(user_id)
-                set_user_prayer_region(user_id, curr_reg, username=username, full_name=from_user.get("first_name", ""))
+                ensure_prayer_user_exists(user_id, username=username, full_name=from_user.get("first_name", ""))
             except Exception as e:
                 print(f"[AUTO PRAYER USER ERR]: {e}")
 
@@ -4277,15 +4682,16 @@ def handle_telegram_update(update, bot_token=None):
 
     if is_admin and text in ("🔔 Azon eslatmasini sinash", "/testnotif", "/test_azon"):
         now_hm = get_now_tashkent().strftime("%H:%M")
+        adm_region = get_user_prayer_region(user_id)
         test_azon = (
             "╭────────────────────────╮\n"
             "   🔔  <b>ASR NAMOZI VAQTI KIRDI! (TEST)</b>\n"
             "╰────────────────────────╯\n\n"
-            f"📍 <b>Hudud:</b> Toshkent | 🕒 <b>Vaqt:</b> {now_hm}\n\n"
-            "🕌 <b>🌇 Asr namozi vaqti kirdi.</b>\n"
+            f"📍 <b>Hudud:</b> {adm_region} | 🕒 <b>Vaqt:</b> {now_hm}\n\n"
+            f"🕌 <b>🌇 Asr namozi vaqti kirdi ({adm_region} vaqti bilan).</b>\n"
             "<i>«Albatta, namoz mo'minlarga vaqtida farz qilingandir.» (Niso, 103)</i>\n\n"
             "✨ <b>Bildirishnoma tizimi 100% barqaror ishlamoqda!</b>\n"
-            "<i>Har bir namoz vaqti kirishi bilan ushbu xabar avtomatik yuboriladi.</i>"
+            f"<i>Har bir namoz vaqti kirishi bilan ushbu xabar avtomatik yuboriladi ({adm_region} bo'yicha).</i>"
         )
         send_telegram_msg(chat_id, test_azon, reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
         return
@@ -4657,10 +5063,9 @@ def handle_telegram_update(update, bot_token=None):
                     """, (session_id, phone, user_id, auth_code, jwt_token, uid, expires_at))
             conn.commit()
 
-            # Namoz botiga ham avtomatik ro'yxatdan o'tkazamiz (tanlangan hududni saqlagan holda)
+            # Namoz botiga ham avtomatik ro'yxatdan o'tkazamiz (tanlangan hudud aslo o'zgarmaydi)
             try:
-                curr_reg = get_user_prayer_region(user_id)
-                set_user_prayer_region(user_id, curr_reg, username=username, full_name=first_name)
+                ensure_prayer_user_exists(user_id, username=username, full_name=first_name)
             except Exception as e_p:
                 print(f"[AUTO PRAYER USER ERR]: {e_p}")
 
@@ -5584,22 +5989,93 @@ def reset_my_cloud_data():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 7. BILDIRISHNOMALAR (FCM PUSH) VA REKLAMA/E'LONLAR TIZIMI
+# 7. QURILMALAR MONITORINGI VA REKLAMA/E'LONLAR TIZIMI
 # ═════════════════════════════════════════════════════════════════════════════
+@app.route('/api/device/ping', methods=['POST'])
+@app.route('/api/device/register', methods=['POST'])
+def register_or_ping_device():
+    """Mobil ilovadan foydalanuvchi qurilmani (Mehmon yoki Fermer) ro'yxatga olish va monitoring qilish"""
+    data = request.get_json(silent=True) or {}
+    device_id = (data.get("device_id") or "").strip()
+    if not device_id:
+        return jsonify({"status": "error", "message": "device_id talab qilinadi"}), 400
+
+    model = (data.get("model") or "Noma'lum").strip()
+    os_info = (data.get("os") or "Android").strip()
+    app_ver = (data.get("app_version") or "").strip()
+    is_reg = bool(data.get("is_registered", False))
+    telegram_id = data.get("telegram_id")
+    phone = (data.get("phone") or "").strip()
+    farmer_name = (data.get("farmer_name") or "").strip()
+    region = (data.get("region") or "").strip() or "Toshkent"
+    ip_addr = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+    if "," in ip_addr:
+        ip_addr = ip_addr.split(",")[0].strip()
+
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        if IS_POSTGRES:
+            c.execute("""
+                INSERT INTO app_devices (device_id, model, os, app_version, is_registered, telegram_id, phone, farmer_name, region, ip_address, last_seen)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (device_id) DO UPDATE SET
+                    model = EXCLUDED.model,
+                    os = EXCLUDED.os,
+                    app_version = EXCLUDED.app_version,
+                    is_registered = EXCLUDED.is_registered,
+                    telegram_id = COALESCE(EXCLUDED.telegram_id, app_devices.telegram_id),
+                    phone = COALESCE(NULLIF(EXCLUDED.phone, ''), app_devices.phone),
+                    farmer_name = COALESCE(NULLIF(EXCLUDED.farmer_name, ''), app_devices.farmer_name),
+                    region = COALESCE(NULLIF(EXCLUDED.region, ''), app_devices.region),
+                    ip_address = EXCLUDED.ip_address,
+                    last_seen = CURRENT_TIMESTAMP
+            """, (device_id, model, os_info, app_ver, is_reg, telegram_id, phone, farmer_name, region, ip_addr))
+        else:
+            c.execute("""
+                INSERT INTO app_devices (device_id, model, os, app_version, is_registered, telegram_id, phone, farmer_name, region, ip_address, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (device_id) DO UPDATE SET
+                    model = excluded.model,
+                    os = excluded.os,
+                    app_version = excluded.app_version,
+                    is_registered = excluded.is_registered,
+                    telegram_id = COALESCE(excluded.telegram_id, app_devices.telegram_id),
+                    phone = COALESCE(NULLIF(excluded.phone, ''), app_devices.phone),
+                    farmer_name = COALESCE(NULLIF(excluded.farmer_name, ''), app_devices.farmer_name),
+                    region = COALESCE(NULLIF(excluded.region, ''), app_devices.region),
+                    ip_address = excluded.ip_address,
+                    last_seen = CURRENT_TIMESTAMP
+            """, (device_id, model, os_info, app_ver, 1 if is_reg else 0, telegram_id, phone, farmer_name, region, ip_addr))
+        conn.commit()
+    except Exception as e:
+        print(f"[DEVICE PING ERR]: {e}")
+    finally:
+        conn.close()
+
+    return jsonify({"status": "success", "device_id": device_id, "is_registered": is_reg})
+
+
 @app.route('/api/ads/active', methods=['GET'])
 @app.route('/api/app/advertisements', methods=['GET'])
 def get_active_ads():
-    """Mobil ilovada ko'rsatiladigan faol reklama bannerlari va e'lonlar"""
+    """Mobil ilovada ko'rsatiladigan faol reklama bannerlari va e'lonlar (Auditoriya filtri bilan)"""
+    device_id = request.args.get("device_id", "").strip()
+    is_reg_param = request.args.get("is_registered")
+    is_registered = (is_reg_param in ("1", "true", "True"))
+
     conn = get_db()
     c = dict_cursor(conn)
     try:
+        aud_filter = "registered" if is_registered else "guests"
         c.execute(adapt_query("""
             SELECT id, title, image_url, link_url, description, category,
-                   COALESCE(media_type, 'text') as media_type, media_file_id, created_at
+                   COALESCE(media_type, 'text') as media_type, media_file_id, 
+                   COALESCE(target_audience, 'all') as target_audience, created_at
             FROM advertisements 
-            WHERE is_active = ? 
+            WHERE is_active = ? AND (target_audience IS NULL OR target_audience = 'all' OR target_audience = ?)
             ORDER BY id DESC LIMIT 15
-        """), (True if IS_POSTGRES else 1,))
+        """), (True if IS_POSTGRES else 1, aud_filter))
         ads = [dict(r) for r in c.fetchall()]
         return jsonify({"status": "success", "ads": ads, "total": len(ads)})
     finally:
