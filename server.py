@@ -540,6 +540,7 @@ def init_cloud_database():
                 notifications BOOLEAN DEFAULT TRUE,
                 notif_offset INTEGER DEFAULT 0,
                 last_notif_time VARCHAR(32),
+                last_card_msg_id BIGINT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """ if IS_POSTGRES else """
@@ -551,9 +552,15 @@ def init_cloud_database():
                 notifications INTEGER DEFAULT 1,
                 notif_offset INTEGER DEFAULT 0,
                 last_notif_time TEXT,
+                last_card_msg_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        try:
+            c.execute("ALTER TABLE prayer_users ADD COLUMN last_card_msg_id BIGINT" if IS_POSTGRES else "ALTER TABLE prayer_users ADD COLUMN last_card_msg_id INTEGER")
+        except Exception:
+            pass
 
         # 14. Mobil Ilova APK Versiyalari (Admin Telegram orqali yangilaydi)
         c.execute("""
@@ -937,48 +944,88 @@ def fetch_prayer_times(region="Toshkent"):
     }
     weekday_uz = uzb_weekdays.get(now_dt.strftime("%A"), "")
 
-    prayer_list = [
-        ("tong_saharlik", "Bomdod", "🏙"),
-        ("quyosh", "Quyosh", "🌅"),
-        ("peshin", "Peshin", "☀️"),
-        ("asr", "Asr", "🌇"),
-        ("shom_iftor", "Shom", "🌆"),
-        ("hufton", "Xufton", "🌃")
-    ]
+    def _to_min(t_str):
+        try:
+            h, m = map(int, str(t_str).split(":"))
+            return h * 60 + m
+        except Exception:
+            return 0
 
-    current_prayer = "Xufton"
-    next_prayer = "Bomdod"
-    next_time = times_result.get("tong_saharlik", "05:00")
-    minutes_left = 0
-    time_left_str = ""
+    now_min = now_dt.hour * 60 + now_dt.minute
 
-    for k, n_uz, _ in prayer_list:
-        t_str = times_result.get(k)
-        if t_str:
-            th, tm = map(int, t_str.split(":"))
-            p_dt = now_dt.replace(hour=th, minute=tm, second=0, microsecond=0)
-            if p_dt > now_dt:
-                next_prayer = n_uz
-                next_time = t_str
-                diff_sec = int((p_dt - now_dt).total_seconds())
-                minutes_left = diff_sec // 60
-                h_left, m_left = divmod(minutes_left, 60)
-                time_left_str = f"{h_left} soat {m_left} daqiqa" if h_left > 0 else f"{m_left} daqiqa"
-                break
-            else:
-                current_prayer = n_uz
+    t_bomdod = _to_min(times_result.get("tong_saharlik", "05:00"))
+    t_quyosh = _to_min(times_result.get("quyosh", "06:20"))
+    t_peshin = _to_min(times_result.get("peshin", "12:30"))
+    t_asr = _to_min(times_result.get("asr", "16:00"))
+    t_shom = _to_min(times_result.get("shom_iftor", "18:15"))
+    t_hufton = _to_min(times_result.get("hufton", "19:40"))
 
-    # Agar bugungi barcha namozlar o'tgan bo'lsa (keyingisi ertangi Bomdod)
-    if not time_left_str:
-        t_str = times_result.get("tong_saharlik", "05:00")
-        th, tm = map(int, t_str.split(":"))
-        p_dt = (now_dt + timedelta(days=1)).replace(hour=th, minute=tm, second=0, microsecond=0)
-        diff_sec = int((p_dt - now_dt).total_seconds())
-        minutes_left = diff_sec // 60
-        h_left, m_left = divmod(minutes_left, 60)
-        time_left_str = f"{h_left} soat {m_left} daqiqa" if h_left > 0 else f"{m_left} daqiqa"
-        next_prayer = "Bomdod (ertaga)"
-        next_time = t_str
+    # Islomiy 5 vaqt namoz bo'yicha hozirgi holat va keyingi namozni to'g'ri aniqlash
+    if now_min < t_bomdod:
+        current_prayer = "Xufton namozi"
+        current_ico = "🌃"
+        active_key = "hufton"
+        next_prayer = "Bomdod"
+        next_ico = "🏙"
+        next_time = times_result.get("tong_saharlik", "05:00")
+        diff_min = t_bomdod - now_min
+    elif now_min < t_quyosh:
+        current_prayer = "Bomdod namozi"
+        current_ico = "🏙"
+        active_key = "tong_saharlik"
+        next_prayer = "Quyosh chiqishi"
+        next_ico = "🌅"
+        next_time = times_result.get("quyosh", "06:20")
+        diff_min = t_quyosh - now_min
+    elif now_min < t_peshin:
+        current_prayer = "Bomdod o'tgan (Peshin kutilmoqda)"
+        current_ico = "⏳"
+        active_key = "quyosh"
+        next_prayer = "Peshin"
+        next_ico = "☀️"
+        next_time = times_result.get("peshin", "12:30")
+        diff_min = t_peshin - now_min
+    elif now_min < t_asr:
+        current_prayer = "Peshin namozi"
+        current_ico = "☀️"
+        active_key = "peshin"
+        next_prayer = "Asr"
+        next_ico = "🌇"
+        next_time = times_result.get("asr", "16:00")
+        diff_min = t_asr - now_min
+    elif now_min < t_shom:
+        current_prayer = "Asr namozi"
+        current_ico = "🌇"
+        active_key = "asr"
+        next_prayer = "Shom"
+        next_ico = "🌆"
+        next_time = times_result.get("shom_iftor", "18:15")
+        diff_min = t_shom - now_min
+    elif now_min < t_hufton:
+        current_prayer = "Shom namozi"
+        current_ico = "🌆"
+        active_key = "shom_iftor"
+        next_prayer = "Xufton"
+        next_ico = "🌃"
+        next_time = times_result.get("hufton", "19:40")
+        diff_min = t_hufton - now_min
+    else:
+        current_prayer = "Xufton namozi"
+        current_ico = "🌃"
+        active_key = "hufton"
+        next_prayer = "Bomdod (ertaga tongda)"
+        next_ico = "🏙"
+        next_time = times_result.get("tong_saharlik", "05:00")
+        diff_min = (24 * 60 - now_min) + t_bomdod
+
+    h_left = diff_min // 60
+    m_left = diff_min % 60
+    if h_left > 0 and m_left > 0:
+        time_left_str = f"{h_left} soat {m_left} daqiqa"
+    elif h_left > 0:
+        time_left_str = f"{h_left} soat"
+    else:
+        time_left_str = f"{m_left} daqiqa"
 
     formatted_data = {
         "region": region,
@@ -987,9 +1034,12 @@ def fetch_prayer_times(region="Toshkent"):
         "now_time": now_dt.strftime("%H:%M"),
         "times": times_result,
         "current_prayer": current_prayer,
+        "current_ico": current_ico,
+        "active_key": active_key,
         "next_prayer": next_prayer,
+        "next_ico": next_ico,
         "next_time": next_time,
-        "minutes_left": minutes_left,
+        "minutes_left": diff_min,
         "time_left_str": time_left_str
     }
 
@@ -999,24 +1049,25 @@ def fetch_prayer_times(region="Toshkent"):
 
 
 def format_prayer_card_message(region: str):
-    """Telegram bot uchun ko'rkam namoz vaqtlari matni"""
+    """Telegram bot uchun to'liq va ideal namoz taqvimi kartasi (barcha ma'lumotlar bitta chiroyli xabarda)"""
     data = fetch_prayer_times(region)
     times = data["times"]
+    active_k = data.get("active_key")
 
     prayer_lines = [
-        ("tong_saharlik", "Bomdod", "🏙"),
-        ("quyosh", "Quyosh", "🌅"),
-        ("peshin", "Peshin", "☀️"),
-        ("asr", "Asr", "🌇"),
-        ("shom_iftor", "Shom", "🌆"),
-        ("hufton", "Xufton", "🌃")
+        ("tong_saharlik", "Bomdod (Saharlik)", "🏙"),
+        ("quyosh", "Quyosh chiqishi", "🌅"),
+        ("peshin", "Peshin namozi", "☀️"),
+        ("asr", "Asr namozi", "🌇"),
+        ("shom_iftor", "Shom (Iftorlik)", "🌆"),
+        ("hufton", "Xufton namozi", "🌃")
     ]
 
     schedule_text = ""
     for k, name, ico in prayer_lines:
         val = times.get(k, "--:--")
-        if name in data["current_prayer"]:
-            schedule_text += f"🟢 <b>{ico} {name}: {val}</b> <i>(Hozir)</i>\n"
+        if k == active_k:
+            schedule_text += f"🟢 <b>{ico} {name}:</b> <code>{val}</code>  <i>◀️ (Hozir)</i>\n"
         else:
             schedule_text += f"▫️ {ico} {name}: <code>{val}</code>\n"
 
@@ -1024,13 +1075,16 @@ def format_prayer_card_message(region: str):
         "╭────────────────────────╮\n"
         f"   🕌  <b>{region.upper()} NAMOZ TAQVIMI</b>\n"
         "╰────────────────────────╯\n"
+        f"📍 <b>Tanlangan hudud:</b> <b>{region}</b>\n"
         f"📅 <b>Sana:</b> {data['date']} • <b>{data['weekday']}</b>\n"
-        f"🕒 <b>Hozirgi vaqt:</b> {data['now_time']}\n\n"
-        f"📋 <b>Kunlik namoz vaqtlari:</b>\n"
-        f"{schedule_text}\n"
+        f"🕒 <b>Hozirgi vaqt:</b> {data['now_time']} (O'zbekiston vaqti)\n\n"
+        f"🟢 <b>Hozirgi holat:</b> <b>{data['current_prayer']}</b>\n"
         f"⏳ <b>Keyingi ibodat:</b> <b>{data['next_prayer']} ({data['next_time']})</b>\n"
-        f"⌛️ <b>Qolgan vaqt:</b> <i>{data['time_left_str']}</i>\n\n"
-        "────────────────────────\n"
+        f"⌛️ <b>Qolgan vaqt:</b> <b>{data['time_left_str']}</b> ({data['minutes_left']} daqiqa)\n\n"
+        f"📋 <b>Kunlik to'liq namoz vaqtlari jadvali:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{schedule_text}"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
         "💬 <i>«Namozni to'kis ado etinglar. Albatta, namoz mo'minlarga vaqtida tayinlangan farzdir.» (Niso, 103)</i>\n"
         "✨ <i>Alloh taolo ibodatlaringizni dargohida qabul qilsin!</i>"
     )
@@ -1060,6 +1114,69 @@ def send_telegram_msg(chat_id, text, reply_markup=None, bot_token=None):
     except Exception as e:
         print(f"[TG MSG ERR]: {e}")
     return None
+
+
+def delete_telegram_msg(chat_id, message_id, bot_token=None):
+    """Telegramdan xabarni o'chirish (Chatda eski xabarlar to'planib ketmasligi uchun)"""
+    tok = bot_token or PRAYER_BOT_TOKEN or CHORVA_BOT_TOKEN
+    if not tok or not message_id:
+        return False
+    url = f"https://api.telegram.org/bot{tok}/deleteMessage"
+    try:
+        r = requests.post(url, json={"chat_id": chat_id, "message_id": int(message_id)}, timeout=5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+USER_LAST_PRAYER_MSG = {}  # {telegram_id: message_id}
+
+
+def send_or_replace_prayer_card(chat_id, user_id, region, reply_markup=None, bot_token=None):
+    """
+    Foydalanuvchiga yangi namoz taqvimini yuborishdan oldin avvalgi yuborilgan namoz kartasini
+    Telegram chatdan avtomat o'chirib, o'rniga yangisini yuboradi.
+    Natijada Telegramda xabarlar to'planib ketmaydi va eng so'nggi ma'lumot qoladi.
+    """
+    tok = bot_token or PRAYER_BOT_TOKEN or CHORVA_BOT_TOKEN
+    
+    # 1. Avvalgi xabar ID sini topish
+    last_mid = USER_LAST_PRAYER_MSG.get(user_id)
+    if not last_mid:
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(adapt_query("SELECT last_card_msg_id FROM prayer_users WHERE telegram_id = ?"), (user_id,))
+            row = c.fetchone()
+            if row and row[0]:
+                last_mid = row[0]
+            conn.close()
+        except Exception:
+            pass
+
+    # 2. Agar avvalgi xabar bo'lsa, Telegramdan o'chiramiz
+    if last_mid:
+        delete_telegram_msg(chat_id, last_mid, bot_token=tok)
+
+    # 3. Yangi, bitta mukammal kartani yuboramiz
+    card_text = format_prayer_card_message(region)
+    kb = reply_markup or get_prayer_action_keyboard(region)
+    res = send_telegram_msg(chat_id, card_text, reply_markup=kb, bot_token=tok)
+
+    # 4. Yangi xabar ID sini eslab qolamiz
+    if res and res.get("message_id"):
+        new_mid = res["message_id"]
+        USER_LAST_PRAYER_MSG[user_id] = new_mid
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(adapt_query("UPDATE prayer_users SET last_card_msg_id = ? WHERE telegram_id = ?"), (new_mid, user_id))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    return res
 
 
 def inspect_apk_metadata(source):
@@ -2354,6 +2471,19 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
             print(f"[TG BACKUP SEND ERR]: {tg_err}")
 
         # 3. GitHub API orqali repository ga commit/push qilish
+        gh_enabled = (get_system_setting("github_backup_enabled", "1") != "0")
+        if not gh_enabled:
+            print("[GITHUB BACKUP SKIPPED]: github_backup_enabled is 0, telegram backup sent.")
+            set_system_setting("last_backup_date", today_date)
+            return True, "Faqat Telegram zaxirasi yuborildi (GitHub o'chirilgan)"
+
+        # Agar avtomatik kunlik tekshiruv (cron) bo'lsa va token avval 401 (yaroqsiz) deb belgilangan bo'lsa:
+        is_token_valid = (get_system_setting("github_token_valid", "1") != "0")
+        if triggered_by == "cron" and not is_token_valid:
+            print("[GITHUB BACKUP SKIPPED]: GitHub token yaroqsiz (401). Qayta xato xabari yuborilmaydi. Telegram zaxirasi xavfsiz yetib borgan.")
+            set_system_setting("last_backup_date", today_date)
+            return True, "Faqat Telegram zaxirasi yuborildi (GitHub token yaroqsiz)"
+
         if not token:
             msg_no_token = (
                 "⚠️ <b>GitHub Token hali o'rnatilmagan!</b>\n\n"
@@ -2370,11 +2500,16 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
             set_system_setting("last_backup_date", today_date)
             return False, "GitHub token o'rnatilmagan"
 
-        gh_headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "ChorvaERP-Cloud-Backup"
-        }
+        def _make_headers(tk, use_token_prefix):
+            auth_val = f"token {tk}" if use_token_prefix else f"Bearer {tk}"
+            return {
+                "Authorization": auth_val,
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "ChorvaERP-Cloud-Backup"
+            }
+
+        prefer_token_pfx = token.startswith("ghp_")
+        gh_headers = _make_headers(token, prefer_token_pfx)
         gh_file_path = "database_backup/chorva_database_backup.json"
         api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{gh_file_path}"
 
@@ -2382,6 +2517,10 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
         sha = None
         try:
             get_resp = requests.get(api_url, headers=gh_headers, timeout=15)
+            if get_resp.status_code == 401:
+                # Muqobil prefiks bilan yana bir bor sinab ko'ramiz
+                gh_headers = _make_headers(token, not prefer_token_pfx)
+                get_resp = requests.get(api_url, headers=gh_headers, timeout=15)
             if get_resp.status_code == 200:
                 sha = get_resp.json().get("sha")
         except Exception as e:
@@ -2396,9 +2535,15 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
             put_body["sha"] = sha
 
         put_resp = requests.put(api_url, headers=gh_headers, json=put_body, timeout=25)
+        if put_resp.status_code == 401:
+            # Agar birinchi prefiks bilan 401 bo'lsa, ikkinchisi bilan urinib ko'ramiz
+            alt_headers = _make_headers(token, not prefer_token_pfx)
+            put_resp = requests.put(api_url, headers=alt_headers, json=put_body, timeout=25)
+
         if put_resp.status_code in (200, 201):
             set_system_setting("last_backup_date", today_date)
             set_system_setting("last_backup_time", now_str)
+            set_system_setting("github_token_valid", "1")
 
             success_gh = (
                 "╭────────────────────────╮\n"
@@ -2414,6 +2559,21 @@ def backup_database_to_github(triggered_by="cron", chat_id=None):
                 send_telegram_msg(chat_id, success_gh, bot_token=CHORVA_BOT_TOKEN)
             print(f"[GITHUB BACKUP SUCCESS]: {now_str}")
             return True, "Muvaffaqiyatli saqlandi"
+        elif put_resp.status_code == 401:
+            set_system_setting("last_backup_date", today_date)
+            set_system_setting("github_token_valid", "0")
+            friendly_err = (
+                "⚠️ <b>GitHub Tokeningiz muddati tugagan yoki yaroqsiz (Bad credentials)!</b>\n\n"
+                "🛡 <i>Xavotir olmang: Bugungi ma'lumotlar bazasi zaxirasi Telegram orqali sizga to'liq yetib keldi va xavfsiz saqlanmoqda.</i>\n\n"
+                "🔑 <b>GitHub bilan sinxronlashni tiklash uchun:</b>\n"
+                "1. Yangi GitHub token (repo huquqi bilan) oling;\n"
+                "2. Botga yuboring: <code>/set_github_token ghp_yangi_token</code>\n\n"
+                "❌ <i>Agar GitHub zaxirasi kerak bo'lmasa, uni o'chirib qo'yishingiz mumkin:</i> <code>/disable_github</code>"
+            )
+            print(f"[GITHUB BACKUP 401 INVALID TOKEN]")
+            if chat_id:
+                send_telegram_msg(chat_id, friendly_err, bot_token=CHORVA_BOT_TOKEN)
+            return False, "GitHub token yaroqsiz (Bad credentials)"
         else:
             set_system_setting("last_backup_date", today_date)
             err_msg = f"GitHub API xatosi ({put_resp.status_code}): {put_resp.text[:150]}"
@@ -2570,6 +2730,15 @@ def handle_telegram_update(update, bot_token=None):
 
             card_text = format_prayer_card_message(region)
             edit_telegram_msg(chat_id, msg_id, card_text, get_prayer_action_keyboard(region), bot_token=active_token)
+            USER_LAST_PRAYER_MSG[user_id] = msg_id
+            try:
+                conn = get_db()
+                c = conn.cursor()
+                c.execute(adapt_query("UPDATE prayer_users SET last_card_msg_id = ? WHERE telegram_id = ?"), (msg_id, user_id))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
             return
 
         if cb_data == "tgl_notif":
@@ -3751,8 +3920,7 @@ def handle_telegram_update(update, bot_token=None):
         finally:
             conn.close()
 
-        card_text = format_prayer_card_message(region)
-        send_telegram_msg(chat_id, card_text, reply_markup=get_prayer_action_keyboard(region), bot_token=active_token)
+        send_or_replace_prayer_card(chat_id, user_id, region, reply_markup=get_prayer_action_keyboard(region), bot_token=active_token)
         return
 
     if text in ("📍 Hududni tanlash", "📍 Hudud tanlash", "📍 Hududni o'zgartirish"):
@@ -3937,7 +4105,36 @@ def handle_telegram_update(update, bot_token=None):
             return
         new_tok = parts[1].strip()
         set_system_setting("github_token", new_tok)
-        send_telegram_msg(chat_id, "✅ <b>GitHub Token muvaffaqiyatli saqlandi!</b>\nEndi kunlik zaxira avtomatik GitHub ga yuboriladi.", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        set_system_setting("github_backup_enabled", "1")
+        send_telegram_msg(chat_id, "✅ <b>GitHub Token muvaffaqiyatli saqlandi va yoqildi!</b>\nEndi kunlik zaxira avtomatik GitHub ga yuboriladi.\n\nSinalab ko'rish uchun: <code>/test_github</code>", reply_markup=get_admin_panel_menu(is_prayer_bot), bot_token=active_token)
+        return
+
+    # 0.7.1. GitHub zaxirani o'chirish / yoqish
+    if is_admin and text in ("/disable_github", "/stop_github", "disable_github"):
+        set_system_setting("github_backup_enabled", "0")
+        send_telegram_msg(
+            chat_id,
+            "🛑 <b>GitHub ga avtomatik yuklash o'chirildi!</b>\n\n"
+            "✅ <i>Xotirjam bo'ling: Kunlik to'liq zaxira har kuni soat 03:00 da Telegram orqali sizga yuborilaveradi!</i>\n"
+            "Qayta yoqish uchun: <code>/enable_github</code>",
+            reply_markup=get_admin_panel_menu(is_prayer_bot),
+            bot_token=active_token
+        )
+        return
+
+    if is_admin and text in ("/enable_github", "/start_github", "enable_github"):
+        set_system_setting("github_backup_enabled", "1")
+        send_telegram_msg(
+            chat_id,
+            "🟢 <b>GitHub ga avtomatik yuklash yoqildi!</b>\n\nTekshirib ko'rish uchun: <code>/test_github</code>",
+            reply_markup=get_admin_panel_menu(is_prayer_bot),
+            bot_token=active_token
+        )
+        return
+
+    if is_admin and text in ("/test_github", "test_github"):
+        send_telegram_msg(chat_id, "⏳ <b>GitHub ulanishi tekshirilmoqda va zaxira yuborilmoqda...</b>", bot_token=active_token)
+        threading.Thread(target=backup_database_to_github, kwargs={"triggered_by": "test", "chat_id": chat_id}, daemon=True).start()
         return
 
     # 1. Foydalanuvchilar ro'yxati (Tugmali, Sahifalash va To'liq tahlil bilan)
@@ -4495,20 +4692,30 @@ def prayer_reminder_thread():
                             "<i>«Albatta, namoz mo'minlarga vaqtida farz qilingandir.» (Niso, 103)</i>\n\n"
                             "✨ Alloh taolo qilayotgan ibodat va duolaringizni qabul aylasin!"
                         )
-                        sent = False
-                        if PRAYER_BOT_TOKEN:
-                            res = send_telegram_msg(u["telegram_id"], azon_text, bot_token=PRAYER_BOT_TOKEN)
-                            if res:
-                                sent = True
-                        if not sent and CHORVA_BOT_TOKEN:
-                            send_telegram_msg(u["telegram_id"], azon_text, bot_token=CHORVA_BOT_TOKEN)
+                        # Avvalgi eski namoz xabarini o'chirib, o'rniga yangi xabarni yuboramiz (chat toza turishi uchun)
+                        old_mid = u.get("last_card_msg_id") or USER_LAST_PRAYER_MSG.get(u["telegram_id"])
+                        if old_mid:
+                            delete_telegram_msg(u["telegram_id"], old_mid, bot_token=PRAYER_BOT_TOKEN or CHORVA_BOT_TOKEN)
 
-                        # Oxirgi yuborilgan vaqtni yangilash
+                        kb = get_prayer_action_keyboard(reg)
+                        sent_res = None
+                        if PRAYER_BOT_TOKEN:
+                            sent_res = send_telegram_msg(u["telegram_id"], azon_text, reply_markup=kb, bot_token=PRAYER_BOT_TOKEN)
+                        if not sent_res and CHORVA_BOT_TOKEN:
+                            sent_res = send_telegram_msg(u["telegram_id"], azon_text, reply_markup=kb, bot_token=CHORVA_BOT_TOKEN)
+
+                        # Oxirgi yuborilgan vaqt va xabar ID sini yangilash
                         c_conn = get_db()
                         cc = c_conn.cursor()
                         try:
-                            cc.execute(adapt_query("UPDATE prayer_users SET last_notif_time = ? WHERE telegram_id = ?"),
-                                       (f"{current_hm}_{p_name}", u["telegram_id"]))
+                            new_mid = sent_res.get("message_id") if (sent_res and isinstance(sent_res, dict)) else None
+                            if new_mid:
+                                USER_LAST_PRAYER_MSG[u["telegram_id"]] = new_mid
+                                cc.execute(adapt_query("UPDATE prayer_users SET last_notif_time = ?, last_card_msg_id = ? WHERE telegram_id = ?"),
+                                           (f"{current_hm}_{p_name}", new_mid, u["telegram_id"]))
+                            else:
+                                cc.execute(adapt_query("UPDATE prayer_users SET last_notif_time = ? WHERE telegram_id = ?"),
+                                           (f"{current_hm}_{p_name}", u["telegram_id"]))
                             c_conn.commit()
                         except Exception:
                             pass
