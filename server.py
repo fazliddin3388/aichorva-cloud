@@ -212,6 +212,19 @@ def init_cloud_database():
             )
         """)
 
+        # Bosh Adminni foydalanuvchilar jadvaliga kafolatli kiritish (Foreign Key xatolarini oldini olish uchun)
+        try:
+            c.execute(adapt_query("""
+                INSERT INTO users (id, phone, full_name, telegram_id, telegram_username, is_verified, role)
+                VALUES (1, '+998973387827', 'Fazliddin (Admin)', 225011967, 'fazliddin3388', TRUE, 'admin')
+                ON CONFLICT (id) DO NOTHING
+            """ if IS_POSTGRES else """
+                INSERT OR IGNORE INTO users (id, phone, full_name, telegram_id, telegram_username, is_verified, role)
+                VALUES (1, '+998973387827', 'Fazliddin (Admin)', 225011967, 'fazliddin3388', 1, 'admin')
+            """))
+        except Exception:
+            pass
+
         # 2. Telegram Tasdiqlash Sessiyalari
         c.execute("""
             CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -852,6 +865,49 @@ def jwt_required(f):
             return jsonify({"status": "error", "message": "Yaroqsiz token"}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+def ensure_user_record_exists(user_id, phone=None, role=None, full_name=None):
+    """Bulutli sinxronlashda FOREIGN KEY constraint failed xatolarini 100% bartaraf etish va foydalanuvchi ajratilishini (multi-tenant) kafolatlash"""
+    if not user_id:
+        return None
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute(adapt_query("SELECT id FROM users WHERE id = ?"), (user_id,))
+        row = c.fetchone()
+        if row:
+            return user_id
+
+        # Agar id bo'yicha topilmasa, phone bo'yicha tekshiramiz
+        if phone:
+            c.execute(adapt_query("SELECT id FROM users WHERE phone = ?"), (phone,))
+            p_row = c.fetchone()
+            if p_row:
+                return p_row[0]
+
+        # Users jadvalida ushbu user_id ni xavfsiz yaratamiz
+        f_role = role or ("admin" if is_admin_user(user_id, phone=phone) else "farmer")
+        f_name = full_name or ("Fazliddin (Admin)" if f_role == "admin" else "Fermer")
+        f_phone = phone or f"+99890{user_id}"
+        if IS_POSTGRES:
+            c.execute("""
+                INSERT INTO users (id, phone, full_name, is_verified, role)
+                VALUES (%s, %s, %s, TRUE, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (user_id, f_phone, f_name, f_role))
+        else:
+            c.execute("""
+                INSERT OR IGNORE INTO users (id, phone, full_name, is_verified, role)
+                VALUES (?, ?, ?, 1, ?)
+            """, (user_id, f_phone, f_name, f_role))
+        conn.commit()
+        return user_id
+    except Exception as e:
+        print(f"[ENSURE USER RECORD ERR]: {e}")
+        return user_id
+    finally:
+        conn.close()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -5634,6 +5690,10 @@ def cloud_sync():
     shaxsiy bulutli bo'limi bilan ikki tomonlama to'liq sinxronlash (Push + Pull).
     """
     user_id = request.current_user["user_id"]
+    phone_from_jwt = request.current_user.get("phone", "")
+    role_from_jwt = request.current_user.get("role", "farmer")
+    user_id = ensure_user_record_exists(user_id, phone=phone_from_jwt, role=role_from_jwt) or user_id
+
     payload = request.get_json(silent=True) or {}
     conn = get_db()
     c = conn.cursor()
@@ -5719,10 +5779,24 @@ def cloud_sync():
                 counts["bulls"] += 1
             bull_tag_to_id[tag_id] = bid
 
+        def get_or_lookup_bull_id(t_id):
+            if not t_id:
+                return None
+            clean_t = str(t_id).strip()
+            if clean_t in bull_tag_to_id:
+                return bull_tag_to_id[clean_t]
+            c.execute(adapt_query("SELECT id FROM bulls WHERE user_id = ? AND tag_id = ?"), (user_id, clean_t))
+            ex_b = c.fetchone()
+            if ex_b:
+                bid_found = ex_b[0]
+                bull_tag_to_id[clean_t] = bid_found
+                return bid_found
+            return None
+
         # 2. Tarozi o'lchovlari (Weighings)
         for w in payload.get("weighings", []):
             tag_id = str(w.get("tag_id", "")).strip()
-            bid = bull_tag_to_id.get(tag_id)
+            bid = get_or_lookup_bull_id(tag_id)
             wdate = w.get("weigh_date", str(date.today()))
             weight = float(w.get("weight", 0.0))
             gain = float(w.get("gain_since_last", 0.0))
@@ -5741,7 +5815,7 @@ def cloud_sync():
         # 3. Yem xarajatlari (Feed Logs)
         for f in payload.get("feed_logs", []):
             tag_id = f.get("tag_id")
-            bid = bull_tag_to_id.get(tag_id) if tag_id else None
+            bid = get_or_lookup_bull_id(tag_id) if tag_id else None
             ldate = f.get("log_date", str(date.today()))
             ftype = f.get("feed_type", "")
             amount = float(f.get("amount_kg", 0.0))
@@ -5786,7 +5860,7 @@ def cloud_sync():
         # 5. Boshqa xarajatlar
         for o in payload.get("other_expenses", []):
             tag_id = o.get("tag_id")
-            bid = bull_tag_to_id.get(tag_id) if tag_id else None
+            bid = get_or_lookup_bull_id(tag_id) if tag_id else None
             edate = o.get("exp_date", str(date.today()))
             cat = o.get("category", "")
             amt = float(o.get("amount", 0.0))
@@ -5848,7 +5922,7 @@ def cloud_sync():
         # 8. Emlash taqvimi
         for v in payload.get("vaccine_schedules", []):
             tag_id = v.get("tag_id")
-            bid = bull_tag_to_id.get(tag_id) if tag_id else None
+            bid = get_or_lookup_bull_id(tag_id) if tag_id else None
             vname = v.get("vaccine_name", "")
             pdate = v.get("planned_date", str(date.today()))
             cdate = v.get("completed_date")
@@ -5878,7 +5952,7 @@ def cloud_sync():
         counts["breeding_records"] = 0
         for br in payload.get("breeding_records", []):
             mtag = str(br.get("mother_tag", "")).strip()
-            mbid = bull_tag_to_id.get(mtag) if mtag else None
+            mbid = get_or_lookup_bull_id(mtag) if mtag else None
             atype = br.get("animal_type", "Sovliq")
             br_date = br.get("breeding_date")
             br_method = br.get("breeding_method")
